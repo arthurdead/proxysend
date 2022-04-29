@@ -1,0 +1,39 @@
+"Games"
+{
+	"tf"
+	{
+		"Signatures"
+		{
+			"SendTable_CalcDelta"
+			{
+				"library" "engine"
+				"linux" "@_Z19SendTable_CalcDeltaPK9SendTablePKviS3_iPiii"
+			}
+			"SendTable_Encode"
+			{
+				"library" "engine"
+				"linux" "@_Z16SendTable_EncodePK9SendTablePKvP8bf_writeiP10CUtlMemoryI20CSendProxyRecipientsiEb"
+			}
+			"SV_ComputeClientPacks"
+			{
+				"library" "engine"
+				"linux" "@_Z21SV_ComputeClientPacksiPP11CGameClientP14CFrameSnapshot"
+			}
+			"CGameServer::SendClientMessages"
+			{
+				"library" "engine"
+				"linux" "@_ZN11CGameServer18SendClientMessagesEb"
+			}
+			"CFrameSnapshotManager::GetPackedEntity"
+			{
+				"library" "engine"
+				"linux" "@_ZN21CFrameSnapshotManager15GetPackedEntityEP14CFrameSnapshoti"
+			}
+			"CBaseServer::WriteDeltaEntities"
+			{
+				"library" "engine"
+				"linux" "@_ZN11CBaseServer18WriteDeltaEntitiesEP11CBaseClientP12CClientFrameS3_R8bf_write"
+			}
+		}
+	}
+}
