@@ -57,10 +57,6 @@ static Sample g_Sample;		/**< Global singleton for extension's main interface */
 SMEXT_LINK(&g_Sample);
 
 static IGameConfig *gameconf{nullptr};
-
-static std::mutex mux;
-
-static ISDKTools *g_pSDKTools{nullptr};
 static ISDKHooks *g_pSDKHooks{nullptr};
 
 class CFrameSnapshot;
@@ -78,63 +74,6 @@ class CBaseEntity : public IServerEntity
 {
 };
 
-struct opaque_ptr final
-{
-	inline opaque_ptr(opaque_ptr &&other) noexcept
-	{ operator=(std::move(other)); }
-
-	template <typename T>
-	static void del_hlpr(void *ptr_) noexcept
-	{ delete[] static_cast<T *>(ptr_); }
-
-	opaque_ptr() = default;
-
-	template <typename T, typename ...Args>
-	void emplace(std::size_t num, Args &&...args) noexcept {
-		if(del_func && ptr) {
-			del_func(ptr);
-		}
-		ptr = static_cast<void *>(new T{std::forward<Args>(args)...});
-		del_func = del_hlpr<T>;
-	}
-
-	template <typename T>
-	T &get(std::size_t element) noexcept
-	{ return static_cast<T *>(ptr)[element]; }
-	template <typename T = void>
-	T *get() noexcept
-	{ return static_cast<T *>(ptr); }
-
-	template <typename T>
-	const T &get(std::size_t element) const noexcept
-	{ return static_cast<const T *>(ptr)[element]; }
-	template <typename T = void>
-	const T *get() const noexcept
-	{ return static_cast<const T *>(ptr); }
-
-	~opaque_ptr() noexcept {
-		if(del_func && ptr) {
-			del_func(ptr);
-		}
-	}
-
-	opaque_ptr &operator=(opaque_ptr &&other) noexcept
-	{
-		ptr = other.ptr;
-		other.ptr = nullptr;
-		del_func = other.del_func;
-		other.del_func = nullptr;
-		return *this;
-	}
-
-private:
-	opaque_ptr(const opaque_ptr &) = delete;
-	opaque_ptr &operator=(const opaque_ptr &) = delete;
-
-	void *ptr{nullptr};
-	void (*del_func)(void *) {nullptr};
-};
-
 enum prop_types : unsigned char
 {
 	int_,
@@ -147,6 +86,9 @@ enum prop_types : unsigned char
 	vector,
 	qangle,
 	cstring,
+	ehandle,
+	bool_,
+	color32_,
 	unknown,
 };
 
@@ -199,27 +141,89 @@ private:
 
 static const CStandardSendProxies *std_proxies;
 
-static prop_types guess_prop_type(const SendProp *pProp, std::size_t &elements) noexcept
+static const SendProp *m_nPlayerCond{nullptr};
+static const SendProp *_condition_bits{nullptr};
+static const SendProp *m_nPlayerCondEx{nullptr};
+static const SendProp *m_nPlayerCondEx2{nullptr};
+static const SendProp *m_nPlayerCondEx3{nullptr};
+static const SendProp *m_nPlayerCondEx4{nullptr};
+
+static prop_types guess_prop_type(const SendProp *pProp) noexcept
 {
-	elements = 1;
+	if(pProp == m_nPlayerCond ||
+		pProp == _condition_bits ||
+		pProp == m_nPlayerCondEx ||
+		pProp == m_nPlayerCondEx2 ||
+		pProp == m_nPlayerCondEx3 ||
+		pProp == m_nPlayerCondEx4) {
+		return prop_types::unsigned_int;
+	}
 
 	switch(pProp->GetType()) {
 		case DPT_Int: {
 			SendVarProxyFn pRealProxy{pProp->GetProxyFn()};
 			if(pProp->GetFlags() & SPROP_UNSIGNED) {
 				if(pRealProxy == std_proxies->m_UInt8ToInt32) {
+					if(pProp->m_nBits == 1) {
+						return prop_types::bool_;
+					}
+
 					return prop_types::unsigned_char;
 				} else if(pRealProxy == std_proxies->m_UInt16ToInt32) {
 					return prop_types::unsigned_short;
+				} else if(pRealProxy == std_proxies->m_UInt32ToInt32) {
+					return prop_types::unsigned_int;
 				} else {
+					{
+						if(pProp->m_nBits == NUM_NETWORKED_EHANDLE_BITS) {
+							struct dummy_t {
+								CBaseHandle val{};
+							} dummy;
+
+							DVariant out{};
+							pRealProxy(pProp, static_cast<const void *>(&dummy), static_cast<const void *>(&dummy.val), &out, 0, 0);
+							if(out.m_Int == INVALID_NETWORKED_EHANDLE_VALUE) {
+								return prop_types::ehandle;
+							}
+						}
+					}
+
+					{
+						if(pProp->m_nBits == 32) {
+							struct dummy_t {
+								color32 val{150, 150, 150, 150};
+							} dummy;
+
+							DVariant out{};
+							pRealProxy(pProp, static_cast<const void *>(&dummy), static_cast<const void *>(&dummy.val), &out, 0, 0);
+							if(out.m_Int == *reinterpret_cast<unsigned int *>(&dummy.val)) {
+								return prop_types::color32_;
+							}
+						}
+					}
+
 					return prop_types::unsigned_int;
 				}
 			} else {
-				if(pRealProxy == std_proxies->m_UInt8ToInt32) {
+				if(pRealProxy == std_proxies->m_Int8ToInt32) {
 					return prop_types::char_;
-				} else if(pRealProxy == std_proxies->m_UInt16ToInt32) {
+				} else if(pRealProxy == std_proxies->m_Int16ToInt32) {
 					return prop_types::short_;
+				} else if(pRealProxy == std_proxies->m_Int32ToInt32) {
+					return prop_types::int_;
 				} else {
+					{
+						struct dummy_t {
+							short val{SHRT_MAX-1};
+						} dummy;
+
+						DVariant out{};
+						pRealProxy(pProp, static_cast<const void *>(&dummy), static_cast<const void *>(&dummy.val), &out, 0, 0);
+						if(out.m_Int == dummy.val+1) {
+							return prop_types::short_;
+						}
+					}
+
 					return prop_types::int_;
 				}
 			}
@@ -411,11 +415,13 @@ private:
 
 struct callback_t final : prop_reference_t
 {
-	callback_t(SendProp *pProp, prop_types type_, std::size_t elements_, std::size_t offset_) noexcept
-		: prop_reference_t{pProp}, offset{offset_}, elements{elements_}, type{type_}, prop{pProp}
+	callback_t(int index_, SendProp *pProp, prop_types type_, std::size_t offset_) noexcept
+		: prop_reference_t{pProp}, offset{offset_}, type{type_}, prop{pProp}, index{index_}
 	{
 		if(type == prop_types::cstring) {
-			fwd = forwards->CreateForwardEx(nullptr, ET_Hook, 7, nullptr, Param_Cell, Param_String, Param_String, Param_Cell, Param_Cell, Param_Cell);
+			fwd = forwards->CreateForwardEx(nullptr, ET_Hook, 6, nullptr, Param_Cell, Param_String, Param_String, Param_Cell, Param_Cell, Param_Cell);
+		} else if(type == prop_types::color32_) {
+			fwd = forwards->CreateForwardEx(nullptr, ET_Hook, 8, nullptr, Param_Cell, Param_String, Param_CellByRef, Param_CellByRef, Param_CellByRef, Param_CellByRef, Param_Cell, Param_Cell);
 		} else {
 			ParamType value_param_type;
 
@@ -425,7 +431,9 @@ struct callback_t final : prop_reference_t
 				case prop_types::char_:
 				case prop_types::unsigned_int:
 				case prop_types::unsigned_short:
-				case prop_types::unsigned_char: {
+				case prop_types::unsigned_char:
+				case prop_types::bool_:
+				case prop_types::ehandle: {
 					value_param_type = Param_CellByRef;
 				} break;
 				case prop_types::float_: {
@@ -437,13 +445,138 @@ struct callback_t final : prop_reference_t
 				} break;
 			}
 
-			fwd = forwards->CreateForwardEx(nullptr, ET_Hook, 6, nullptr, Param_Cell, Param_String, value_param_type, Param_Cell, Param_Cell);
+			fwd = forwards->CreateForwardEx(nullptr, ET_Hook, 5, nullptr, Param_Cell, Param_String, value_param_type, Param_Cell, Param_Cell);
 		}
+	}
+
+	inline bool has_any_per_client_func() const noexcept
+	{ return !per_client_funcs.empty(); }
+
+	void change_edict_state() noexcept
+	{
+		if(index != -1) {
+			edict_t *edict{gamehelpers->EdictOfIndex(index)};
+			if(edict) {
+				gamehelpers->SetEdictStateChanged(edict, offset);
+			}
+		}
+	}
+
+	void add_function(IPluginFunction *func, bool per_client) noexcept
+	{
+		fwd->RemoveFunction(func);
+		fwd->AddFunction(func);
+
+		if(per_client) {
+			if(std::find(per_client_funcs.cbegin(), per_client_funcs.cend(), func) == per_client_funcs.cend()) {
+				per_client_funcs.emplace_back(func);
+			}
+		}
+
+		change_edict_state();
+	}
+
+	void remove_function(IPluginFunction *func) noexcept
+	{
+		fwd->RemoveFunction(func);
+
+		per_client_funcs_t::const_iterator it_func{std::find(per_client_funcs.cbegin(), per_client_funcs.cend(), func)};
+		if(it_func != per_client_funcs.cend()) {
+			per_client_funcs.erase(it_func);
+		}
+
+		change_edict_state();
+	}
+
+	void remove_functions_of_plugin(IPlugin *plugin) noexcept
+	{
+		per_client_funcs_t::const_iterator it_func{per_client_funcs.cbegin()};
+		while(it_func != per_client_funcs.cend()) {
+			if((*it_func)->GetParentContext() == plugin->GetBaseContext()) {
+				it_func = per_client_funcs.erase(it_func);
+				continue;
+			}
+			++it_func;
+		}
+
+		fwd->RemoveFunctionsOfPlugin(plugin);
+
+		change_edict_state();
 	}
 
 	~callback_t() noexcept override final {
 		if(fwd) {
 			forwards->ReleaseForward(fwd);
+		}
+		change_edict_state();
+	}
+
+	static int get_current_client_slot() noexcept
+	{
+		if(!current_packentity_params ||
+			current_packentity_params->current_slot == -1) {
+			return -1;
+		}
+
+		return current_packentity_params->current_slot;
+	}
+
+	static int get_current_client_entity() noexcept
+	{
+		int slot{get_current_client_slot()};
+		if(slot == -1) {
+			return -1;
+		}
+
+		return slot+1;
+	}
+
+	void fwd_call_ehandle(const SendProp *pProp, const void *pStructBase, const void *pData, DVariant *pOut, int iElement, int objectID) const noexcept
+	{
+		fwd->PushCell(objectID);
+		fwd->PushString(pProp->GetName());
+		const CBaseHandle &hndl{*reinterpret_cast<const CBaseHandle *>(pData)};
+		edict_t *edict{gamehelpers->GetHandleEntity(const_cast<CBaseHandle &>(hndl))};
+		cell_t sp_value{static_cast<cell_t>(edict ? gamehelpers->IndexOfEdict(edict) : -1)};
+		fwd->PushCellByRef(&sp_value);
+		fwd->PushCell(iElement);
+		fwd->PushCell(get_current_client_entity());
+		cell_t res{Pl_Continue};
+		fwd->Execute(&res);
+		if(res == Pl_Changed) {
+			edict = gamehelpers->EdictOfIndex(sp_value);
+			CBaseHandle new_value{};
+			if(edict) {
+				gamehelpers->SetHandleEntity(new_value, edict);
+			}
+			restore->pRealProxy(pProp, pStructBase, static_cast<const void *>(&new_value), pOut, iElement, objectID);
+		} else {
+			restore->pRealProxy(pProp, pStructBase, pData, pOut, iElement, objectID);
+		}
+	}
+
+	void fwd_call_color32(const SendProp *pProp, const void *pStructBase, const void *pData, DVariant *pOut, int iElement, int objectID) const noexcept
+	{
+		fwd->PushCell(objectID);
+		fwd->PushString(pProp->GetName());
+		const color32 &clr{*reinterpret_cast<const color32 *>(pData)};
+		cell_t sp_r{static_cast<cell_t>(clr.r)};
+		cell_t sp_g{static_cast<cell_t>(clr.g)};
+		cell_t sp_b{static_cast<cell_t>(clr.b)};
+		cell_t sp_a{static_cast<cell_t>(clr.a)};
+		fwd->PushCellByRef(&sp_r);
+		fwd->PushCellByRef(&sp_g);
+		fwd->PushCellByRef(&sp_b);
+		fwd->PushCellByRef(&sp_a);
+		fwd->PushCell(iElement);
+		fwd->PushCell(get_current_client_entity());
+		cell_t res{Pl_Continue};
+		fwd->Execute(&res);
+		if(res == Pl_Changed) {
+			const color32 new_value{static_cast<byte>(sp_r), static_cast<byte>(sp_g), static_cast<byte>(sp_b), static_cast<byte>(sp_a)};
+			restore->pRealProxy(pProp, pStructBase, static_cast<const void *>(&new_value), pOut, iElement, objectID);
+		} else {
+			restore->pRealProxy(pProp, pStructBase, pData, pOut, iElement, objectID);
 		}
 	}
 
@@ -455,11 +588,22 @@ struct callback_t final : prop_reference_t
 		cell_t sp_value{static_cast<cell_t>(*reinterpret_cast<const T *>(pData))};
 		fwd->PushCellByRef(&sp_value);
 		fwd->PushCell(iElement);
-		fwd->PushCell(current_packentity_params->current_slot+1);
+		fwd->PushCell(get_current_client_entity());
 		cell_t res{Pl_Continue};
 		fwd->Execute(&res);
 		if(res == Pl_Changed) {
 			const T new_value{static_cast<T>(sp_value)};
+			if constexpr(std::is_same_v<T, unsigned int>) {
+				if(pProp == m_nPlayerCond ||
+					pProp == _condition_bits ||
+					pProp == m_nPlayerCondEx ||
+					pProp == m_nPlayerCondEx2 ||
+					pProp == m_nPlayerCondEx3 ||
+					pProp == m_nPlayerCondEx4) {
+					std_proxies->m_UInt32ToInt32(pProp, pStructBase, static_cast<const void *>(&new_value), pOut, iElement, objectID);
+					return;
+				}
+			}
 			restore->pRealProxy(pProp, pStructBase, static_cast<const void *>(&new_value), pOut, iElement, objectID);
 		} else {
 			restore->pRealProxy(pProp, pStructBase, pData, pOut, iElement, objectID);
@@ -473,7 +617,7 @@ struct callback_t final : prop_reference_t
 		float sp_value{static_cast<float>(*reinterpret_cast<const float *>(pData))};
 		fwd->PushFloatByRef(&sp_value);
 		fwd->PushCell(iElement);
-		fwd->PushCell(current_packentity_params->current_slot+1);
+		fwd->PushCell(get_current_client_entity());
 		cell_t res{Pl_Continue};
 		fwd->Execute(&res);
 		if(res == Pl_Changed) {
@@ -496,7 +640,7 @@ struct callback_t final : prop_reference_t
 		};
 		fwd->PushArray(sp_value, 3, SM_PARAM_COPYBACK);
 		fwd->PushCell(iElement);
-		fwd->PushCell(current_packentity_params->current_slot+1);
+		fwd->PushCell(get_current_client_entity());
 		cell_t res{Pl_Continue};
 		fwd->Execute(&res);
 		if(res == Pl_Changed) {
@@ -520,7 +664,7 @@ struct callback_t final : prop_reference_t
 		fwd->PushStringEx(sp_value, sizeof(sp_value), SM_PARAM_STRING_UTF8|SM_PARAM_STRING_COPY, SM_PARAM_COPYBACK);
 		fwd->PushCell(sizeof(sp_value));
 		fwd->PushCell(iElement);
-		fwd->PushCell(current_packentity_params->current_slot+1);
+		fwd->PushCell(get_current_client_entity());
 		cell_t res{Pl_Continue};
 		fwd->Execute(&res);
 		if(res == Pl_Changed) {
@@ -532,7 +676,7 @@ struct callback_t final : prop_reference_t
 
 	void proxy_call(const SendProp *pProp, const void *pStructBase, const void *pData, DVariant *pOut, int iElement, int objectID) const noexcept
 	{
-		if(!current_packentity_params || current_packentity_params->current_slot == -1) {
+		if(!fwd) {
 			restore->pRealProxy(pProp, pStructBase, pData, pOut, iElement, objectID);
 			return;
 		}
@@ -540,6 +684,9 @@ struct callback_t final : prop_reference_t
 		switch(type) {
 			case prop_types::int_: {
 				fwd_call_int<int>(pProp, pStructBase, pData, pOut, iElement, objectID);
+			} break;
+			case prop_types::bool_: {
+				fwd_call_int<bool>(pProp, pStructBase, pData, pOut, iElement, objectID);
 			} break;
 			case prop_types::short_: {
 				fwd_call_int<short>(pProp, pStructBase, pData, pOut, iElement, objectID);
@@ -565,6 +712,12 @@ struct callback_t final : prop_reference_t
 			case prop_types::qangle: {
 				fwd_call_vec<QAngle>(pProp, pStructBase, pData, pOut, iElement, objectID);
 			} break;
+			case prop_types::color32_: {
+				fwd_call_color32(pProp, pStructBase, pData, pOut, iElement, objectID);
+			} break;
+			case prop_types::ehandle: {
+				fwd_call_ehandle(pProp, pStructBase, pData, pOut, iElement, objectID);
+			} break;
 			case prop_types::cstring: {
 				fwd_call_str(pProp, pStructBase, pData, pOut, iElement, objectID);
 			} break;
@@ -582,16 +735,21 @@ struct callback_t final : prop_reference_t
 		prop = other.prop;
 		other.prop = nullptr;
 		offset = other.offset;
-		elements = other.elements;
 		type = other.type;
+		index = other.index;
+		other.index = -1;
+		per_client_funcs = std::move(other.per_client_funcs);
 		return *this;
 	}
 
 	IChangeableForward *fwd{nullptr};
 	std::size_t offset{-1};
-	std::size_t elements{1};
 	prop_types type{prop_types::unknown};
 	SendProp *prop{nullptr};
+	int index{-1};
+
+	using per_client_funcs_t = std::vector<IPluginFunction *>;
+	per_client_funcs_t per_client_funcs{};
 
 private:
 	callback_t(const callback_t &) = delete;
@@ -604,12 +762,35 @@ using callbacks_t = std::unordered_map<std::string, callback_t>;
 struct proxyhook_t final
 {
 	callbacks_t callbacks;
+	int index{-1};
 
-	inline proxyhook_t(const ServerClass *pServer) noexcept
+	inline proxyhook_t(int index_) noexcept
+		: index{index_}
 	{
 	}
 
-	~proxyhook_t() noexcept = default;
+	~proxyhook_t() noexcept
+	{
+		if(index != -1) {
+			edict_t *edict{gamehelpers->EdictOfIndex(index)};
+			if(edict) {
+				for(callbacks_t::value_type &it : callbacks) {
+					gamehelpers->SetEdictStateChanged(edict, it.second.offset);
+					it.second.index = -1;
+				}
+			}
+		}
+	}
+
+	void add_callback(std::string &&name, IPluginFunction *func, SendProp *pProp, prop_types type, int offset, bool per_client) noexcept
+	{
+		callbacks_t::iterator it_callback{callbacks.find(name)};
+		if(it_callback == callbacks.end()) {
+			it_callback = callbacks.emplace(std::pair<std::string, callback_t>{std::move(name), callback_t{index, pProp, type, offset}}).first;
+		}
+
+		it_callback->second.add_function(func, per_client);
+	}
 
 	inline proxyhook_t(proxyhook_t &&other) noexcept
 	{ operator=(std::move(other)); }
@@ -617,6 +798,8 @@ struct proxyhook_t final
 	proxyhook_t &operator=(proxyhook_t &&other) noexcept
 	{
 		callbacks = std::move(other.callbacks);
+		index = other.index;
+		other.index = -1;
 		return *this;
 	}
 
@@ -841,10 +1024,16 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 		hooks_t::const_iterator it_hook{chooks.find(snapshot->m_pValidEntities[i])};
 		if(it_hook != chooks.cend()) {
 			edict_t *edict{gamehelpers->EdictOfIndex(snapshot->m_pValidEntities[i])};
+			bool any_per_client{false};
 			for(const auto &it_callback : it_hook->second.callbacks) {
-				gamehelpers->SetEdictStateChanged(edict, it_callback.second.offset);
+				if(it_callback.second.has_any_per_client_func()) {
+					gamehelpers->SetEdictStateChanged(edict, it_callback.second.offset);
+					any_per_client = true;
+				}
 			}
-			entities.emplace_back(snapshot->m_pValidEntities[i]);
+			if(any_per_client) {
+				entities.emplace_back(snapshot->m_pValidEntities[i]);
+			}
 		}
 	}
 
@@ -893,15 +1082,6 @@ static void global_send_proxy(const SendProp *pProp, const void *pStructBase, co
 	}
 }
 
-static void OnGameFrame(bool simulating) noexcept
-{
-	if(!simulating) {
-		return;
-	}
-
-	
-}
-
 static cell_t proxysend_hook(IPluginContext *pContext, const cell_t *params) noexcept
 {
 	int idx{gamehelpers->ReferenceToBCompatRef(params[1])};
@@ -923,8 +1103,7 @@ static cell_t proxysend_hook(IPluginContext *pContext, const cell_t *params) noe
 	}
 
 	SendProp *pProp{info.prop};
-	std::size_t elements{1};
-	prop_types type{guess_prop_type(pProp, elements)};
+	prop_types type{guess_prop_type(pProp)};
 	if(type == prop_types::unknown) {
 		return pContext->ThrowNativeError("Unsupported prop");
 	}
@@ -937,16 +1116,10 @@ static cell_t proxysend_hook(IPluginContext *pContext, const cell_t *params) noe
 
 	hooks_t::iterator it_hook{hooks.find(idx)};
 	if(it_hook == hooks.end()) {
-		it_hook = hooks.emplace(std::pair<int, proxyhook_t>{idx, proxyhook_t{pServer}}).first;
+		it_hook = hooks.emplace(std::pair<int, proxyhook_t>{idx, proxyhook_t{idx}}).first;
 	}
 
-	callbacks_t::iterator it_callback{it_hook->second.callbacks.find(name)};
-	if(it_callback == it_hook->second.callbacks.end()) {
-		it_callback = it_hook->second.callbacks.emplace(std::pair<std::string, callback_t>{std::move(name), callback_t{pProp, type, elements, info.actual_offset}}).first;
-	}
-
-	it_callback->second.fwd->RemoveFunction(callback);
-	it_callback->second.fwd->AddFunction(callback);
+	it_hook->second.add_callback(std::move(name), callback, pProp, type, info.actual_offset, static_cast<bool>(params[4]));
 
 	return 0;
 }
@@ -972,7 +1145,7 @@ static cell_t proxysend_unhook(IPluginContext *pContext, const cell_t *params) n
 	if(it_hook != hooks.end()) {
 		callbacks_t::iterator it_callback{it_hook->second.callbacks.find(name)};
 		if(it_callback != it_hook->second.callbacks.end()) {
-			it_callback->second.fwd->RemoveFunction(callback);
+			it_callback->second.remove_function(callback);
 		#ifdef _DEBUG
 			printf("removed %s hook for %i\n", name.c_str(), idx);
 		#endif
@@ -1026,15 +1199,27 @@ bool Sample::SDK_OnLoad(char *error, size_t maxlen, bool late) noexcept
 	CBaseServer_WriteDeltaEntities_detour = DETOUR_CREATE_MEMBER(CBaseServer_WriteDeltaEntities, "CBaseServer::WriteDeltaEntities");
 	CBaseServer_WriteDeltaEntities_detour->EnableDetour();
 
-	sharesys->AddDependency(myself, "sdktools.ext", true, true);
 	sharesys->AddDependency(myself, "sdkhooks.ext", true, true);
 
 	sharesys->RegisterLibrary(myself, "proxysend");
 
-	smutils->AddGameFrameHook(OnGameFrame);
 	plsys->AddPluginsListener(this);
 
 	sharesys->AddNatives(myself, natives);
+
+	sm_sendprop_info_t info{};
+	gamehelpers->FindSendPropInfo("CTFPlayer", "m_nPlayerCond", &info);
+	m_nPlayerCond = info.prop;
+	gamehelpers->FindSendPropInfo("CTFPlayer", "_condition_bits", &info);
+	_condition_bits = info.prop;
+	gamehelpers->FindSendPropInfo("CTFPlayer", "m_nPlayerCondEx", &info);
+	m_nPlayerCondEx = info.prop;
+	gamehelpers->FindSendPropInfo("CTFPlayer", "m_nPlayerCondEx2", &info);
+	m_nPlayerCondEx2 = info.prop;
+	gamehelpers->FindSendPropInfo("CTFPlayer", "m_nPlayerCondEx3", &info);
+	m_nPlayerCondEx3 = info.prop;
+	gamehelpers->FindSendPropInfo("CTFPlayer", "m_nPlayerCondEx4", &info);
+	m_nPlayerCondEx4 = info.prop;
 
 	return true;
 }
@@ -1077,7 +1262,6 @@ void Sample::SDK_OnUnload() noexcept
 
 	gameconfs->CloseGameConfigFile(gameconf);
 
-	smutils->RemoveGameFrameHook(OnGameFrame);
 	plsys->RemovePluginsListener(this);
 	g_pSDKHooks->RemoveEntityListener(this);
 }
@@ -1102,7 +1286,7 @@ void Sample::OnPluginUnloaded(IPlugin *plugin) noexcept
 	while(it_hook != hooks.end()) {
 		callbacks_t::iterator it_callback{it_hook->second.callbacks.begin()};
 		while(it_callback != it_hook->second.callbacks.end()) {
-			it_callback->second.fwd->RemoveFunctionsOfPlugin(plugin);
+			it_callback->second.remove_functions_of_plugin(plugin);
 			if(it_callback->second.fwd->GetFunctionCount() == 0) {
 				it_callback = it_hook->second.callbacks.erase(it_callback);
 				continue;
@@ -1119,7 +1303,6 @@ void Sample::OnPluginUnloaded(IPlugin *plugin) noexcept
 
 void Sample::SDK_OnAllLoaded() noexcept
 {
-	SM_GET_LATE_IFACE(SDKTOOLS, g_pSDKTools);
 	SM_GET_LATE_IFACE(SDKHOOKS, g_pSDKHooks);
 
 	g_pSDKHooks->AddEntityListener(this);

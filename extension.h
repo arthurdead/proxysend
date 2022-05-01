@@ -39,7 +39,6 @@
 
 #include "smsdk_ext.h"
 #include <ISDKHooks.h>
-#include <ISDKTools.h>
 
 /**
  * @brief Sample implementation of the SDK Extension.
