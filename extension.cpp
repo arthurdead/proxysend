@@ -188,6 +188,7 @@ static prop_types guess_prop_type(const SendProp *pProp) noexcept
 						}
 					}
 
+				#if 0
 					{
 						if(pProp->m_nBits == 32) {
 							struct dummy_t {
@@ -201,6 +202,7 @@ static prop_types guess_prop_type(const SendProp *pProp) noexcept
 							}
 						}
 					}
+				#endif
 
 					return prop_types::unsigned_int;
 				}
@@ -676,7 +678,7 @@ struct callback_t final : prop_reference_t
 
 	void proxy_call(const SendProp *pProp, const void *pStructBase, const void *pData, DVariant *pOut, int iElement, int objectID) const noexcept
 	{
-		if(!fwd) {
+		if(!fwd || (has_any_per_client_func() && get_current_client_entity() == -1)) {
 			restore->pRealProxy(pProp, pStructBase, pData, pOut, iElement, objectID);
 			return;
 		}
@@ -1026,8 +1028,8 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 			edict_t *edict{gamehelpers->EdictOfIndex(snapshot->m_pValidEntities[i])};
 			bool any_per_client{false};
 			for(const auto &it_callback : it_hook->second.callbacks) {
+				gamehelpers->SetEdictStateChanged(edict, it_callback.second.offset);
 				if(it_callback.second.has_any_per_client_func()) {
-					gamehelpers->SetEdictStateChanged(edict, it_callback.second.offset);
 					any_per_client = true;
 				}
 			}
