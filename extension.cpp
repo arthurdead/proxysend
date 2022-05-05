@@ -94,7 +94,7 @@ enum prop_types : unsigned char
 
 static void global_send_proxy(const SendProp *pProp, const void *pStructBase, const void *pData, DVariant *pOut, int iElement, int objectID);
 
-using tables_t = std::unordered_map<const SendTable *, std::size_t *>;
+using tables_t = std::unordered_map<const SendTable *, std::unique_ptr<std::size_t>>;
 static tables_t tables;
 
 struct proxyrestore_t final
@@ -323,9 +323,12 @@ struct table_reference_t
 	{
 		tables_t::iterator it_table{tables.find(pTable)};
 		if(it_table == tables.end()) {
-			it_table = tables.emplace(std::pair<const SendTable *, std::size_t *>{pTable, new std::size_t{0}}).first;
+		#if defined _DEBUG
+			printf("added %s\n", pTable->GetName());
+		#endif
+			it_table = tables.emplace(std::pair<const SendTable *, std::unique_ptr<std::size_t>>{pTable, new std::size_t{0}}).first;
 		}
-		table_ref = it_table->second;
+		table_ref = it_table->second.get();
 		++(*table_ref);
 	}
 
@@ -335,7 +338,7 @@ struct table_reference_t
 			if(--(*table_ref) == 0) {
 				tables_t::iterator it_table{tables.begin()};
 				while(it_table != tables.end()) {
-					if(it_table->second == table_ref) {
+					if(it_table->second.get() == table_ref) {
 						tables.erase(it_table);
 						break;
 					}
@@ -417,8 +420,8 @@ private:
 
 struct callback_t final : prop_reference_t
 {
-	callback_t(int index_, SendProp *pProp, prop_types type_, std::size_t offset_) noexcept
-		: prop_reference_t{pProp}, offset{offset_}, type{type_}, prop{pProp}, index{index_}
+	callback_t(int index_, SendTable *pTable, SendProp *pProp, prop_types type_, std::size_t offset_) noexcept
+		: prop_reference_t{pProp}, offset{offset_}, type{type_}, table{pTable}, prop{pProp}, index{index_}
 	{
 		if(type == prop_types::cstring) {
 			fwd = forwards->CreateForwardEx(nullptr, ET_Hook, 6, nullptr, Param_Cell, Param_String, Param_String, Param_Cell, Param_Cell, Param_Cell);
@@ -470,8 +473,19 @@ struct callback_t final : prop_reference_t
 		fwd->AddFunction(func);
 
 		if(per_client) {
-			if(std::find(per_client_funcs.cbegin(), per_client_funcs.cend(), func) == per_client_funcs.cend()) {
-				per_client_funcs.emplace_back(func);
+			bool found{false};
+
+			per_client_funcs_t::const_iterator it_func{per_client_funcs.cbegin()};
+			while(it_func != per_client_funcs.cend()) {
+				if(it_func->func == func) {
+					found = true;
+					break;
+				}
+				++it_func;
+			}
+
+			if(!found) {
+				per_client_funcs.emplace_back(per_client_func_t{table, func});
 			}
 		}
 
@@ -482,9 +496,13 @@ struct callback_t final : prop_reference_t
 	{
 		fwd->RemoveFunction(func);
 
-		per_client_funcs_t::const_iterator it_func{std::find(per_client_funcs.cbegin(), per_client_funcs.cend(), func)};
-		if(it_func != per_client_funcs.cend()) {
-			per_client_funcs.erase(it_func);
+		per_client_funcs_t::const_iterator it_func{per_client_funcs.cbegin()};
+		while(it_func != per_client_funcs.cend()) {
+			if(it_func->func == func) {
+				per_client_funcs.erase(it_func);
+				break;
+			}
+			++it_func;
 		}
 
 		change_edict_state();
@@ -494,7 +512,7 @@ struct callback_t final : prop_reference_t
 	{
 		per_client_funcs_t::const_iterator it_func{per_client_funcs.cbegin()};
 		while(it_func != per_client_funcs.cend()) {
-			if((*it_func)->GetParentContext() == plugin->GetBaseContext()) {
+			if((*it_func).func->GetParentContext() == plugin->GetBaseContext()) {
 				it_func = per_client_funcs.erase(it_func);
 				continue;
 			}
@@ -736,6 +754,8 @@ struct callback_t final : prop_reference_t
 		other.fwd = nullptr;
 		prop = other.prop;
 		other.prop = nullptr;
+		table = other.table;
+		other.table = nullptr;
 		offset = other.offset;
 		type = other.type;
 		index = other.index;
@@ -747,10 +767,37 @@ struct callback_t final : prop_reference_t
 	IChangeableForward *fwd{nullptr};
 	std::size_t offset{-1};
 	prop_types type{prop_types::unknown};
+	SendTable *table{nullptr};
 	SendProp *prop{nullptr};
 	int index{-1};
 
-	using per_client_funcs_t = std::vector<IPluginFunction *>;
+	struct per_client_func_t : table_reference_t
+	{
+		IPluginFunction *func{nullptr};
+
+		inline per_client_func_t(SendTable *pTable, IPluginFunction *func_) noexcept
+			: table_reference_t{pTable}, func{func_}
+		{
+		}
+
+		inline per_client_func_t(per_client_func_t &&other) noexcept
+			: table_reference_t{std::move(other)}
+		{ operator=(std::move(other)); }
+
+		per_client_func_t &operator=(per_client_func_t &&other) noexcept
+		{
+			func = other.func;
+			other.func = nullptr;
+			return *this;
+		}
+
+	private:
+		per_client_func_t(const per_client_func_t &) = delete;
+		per_client_func_t &operator=(const per_client_func_t &) = delete;
+		per_client_func_t() = delete;
+	};
+
+	using per_client_funcs_t = std::vector<per_client_func_t>;
 	per_client_funcs_t per_client_funcs{};
 
 private:
@@ -761,13 +808,13 @@ private:
 
 using callbacks_t = std::unordered_map<std::string, callback_t>;
 
-struct proxyhook_t final
+struct proxyhook_t final : table_reference_t
 {
 	callbacks_t callbacks;
 	int index{-1};
 
-	inline proxyhook_t(int index_) noexcept
-		: index{index_}
+	inline proxyhook_t(int index_, SendTable *pTable) noexcept
+		: table_reference_t{pTable}, index{index_}
 	{
 	}
 
@@ -784,17 +831,18 @@ struct proxyhook_t final
 		}
 	}
 
-	void add_callback(std::string &&name, IPluginFunction *func, SendProp *pProp, prop_types type, int offset, bool per_client) noexcept
+	void add_callback(std::string &&name, IPluginFunction *func, SendTable *pTable, SendProp *pProp, prop_types type, int offset, bool per_client) noexcept
 	{
 		callbacks_t::iterator it_callback{callbacks.find(name)};
 		if(it_callback == callbacks.end()) {
-			it_callback = callbacks.emplace(std::pair<std::string, callback_t>{std::move(name), callback_t{index, pProp, type, offset}}).first;
+			it_callback = callbacks.emplace(std::pair<std::string, callback_t>{std::move(name), callback_t{index, pTable, pProp, type, offset}}).first;
 		}
 
 		it_callback->second.add_function(func, per_client);
 	}
 
 	inline proxyhook_t(proxyhook_t &&other) noexcept
+		: table_reference_t{std::move(other)}
 	{ operator=(std::move(other)); }
 
 	proxyhook_t &operator=(proxyhook_t &&other) noexcept
@@ -944,7 +992,13 @@ DETOUR_DECL_MEMBER4(CBaseServer_WriteDeltaEntities, void, CBaseClient *, client,
 		return;
 	}
 
-	current_packentity_params->client = client;
+	if(client->IsFakeClient() ||
+		client->IsHLTV() ||
+		client->IsReplay()) {
+		current_packentity_params->client = nullptr;
+	} else {
+		current_packentity_params->client = client;
+	}
 	DETOUR_MEMBER_CALL(CBaseServer_WriteDeltaEntities)(client, to, from, pBuf);
 	current_packentity_params->client = nullptr;
 }
@@ -1001,34 +1055,20 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 		current_packentity_params = nullptr;
 	}
 
-	std::vector<int> slots{};
-
-	for(int i{0}; i < clientCount; ++i) {
-		CGameClient *client{clients[i]};
-		if(!client->IsConnected() ||
-			!client->IsActive() ||
-			!client->IsSpawned() ||
-			client->IsFakeClient() ||
-			client->IsHLTV() ||
-			client->IsReplay()) {
-			continue;
-		}
-		slots.emplace_back(client->GetPlayerSlot());
-	}
-
 	std::vector<int> entities{};
 
 	const hooks_t &chooks{hooks};
 
 	entities.reserve(snapshot->m_nValidEntities);
 
+	bool any_per_client{false};
+
 	for(int i{0}; i < snapshot->m_nValidEntities; ++i) {
 		hooks_t::const_iterator it_hook{chooks.find(snapshot->m_pValidEntities[i])};
 		if(it_hook != chooks.cend()) {
 			edict_t *edict{gamehelpers->EdictOfIndex(snapshot->m_pValidEntities[i])};
-			bool any_per_client{false};
 			for(const auto &it_callback : it_hook->second.callbacks) {
-				gamehelpers->SetEdictStateChanged(edict, it_callback.second.offset);
+				//gamehelpers->SetEdictStateChanged(edict, it_callback.second.offset);
 				if(it_callback.second.has_any_per_client_func()) {
 					any_per_client = true;
 				}
@@ -1039,7 +1079,23 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 		}
 	}
 
-	if(!slots.empty() && !entities.empty()) {
+	std::vector<int> slots{};
+
+	if(any_per_client) {
+		slots.reserve(clientCount);
+
+		for(int i{0}; i < clientCount; ++i) {
+			CGameClient *client{clients[i]};
+			if(client->IsFakeClient() ||
+				client->IsHLTV() ||
+				client->IsReplay()) {
+				continue;
+			}
+			slots.emplace_back(client->GetPlayerSlot());
+		}
+	}
+
+	if(any_per_client && !slots.empty() && !entities.empty()) {
 		current_packentity_params = new pack_entity_params_t{std::move(slots), std::move(entities)};
 	}
 
@@ -1084,6 +1140,88 @@ static void global_send_proxy(const SendProp *pProp, const void *pStructBase, co
 	}
 }
 
+struct sm_sendprop_info_ex_t final : sm_sendprop_info_t
+{
+	SendTable *table;
+};
+
+static bool UTIL_FindInSendTable(SendTable *pTable, 
+						  const char *name,
+						  sm_sendprop_info_ex_t *info,
+						  unsigned int offset) noexcept
+{
+	int props = pTable->GetNumProps();
+	for (int i = 0; i < props; ++i)
+	{
+		SendProp *prop = pTable->GetProp(i);
+
+		// Skip InsideArray props (SendPropArray / SendPropArray2),
+		// we'll find them later by their containing array.
+		if (prop->IsInsideArray()) {
+			continue;
+		}
+
+		const char *pname = prop->GetName();
+		SendTable *pInnerTable = prop->GetDataTable();
+
+		if (pname && strcmp(name, pname) == 0)
+		{
+			// get true offset of CUtlVector
+			//TODO!!!!!!
+			/*if (utlVecOffsetOffset != -1 && prop->GetOffset() == 0 && pInnerTable && pInnerTable->GetNumProps())
+			{
+				SendProp *pLengthProxy = pInnerTable->GetProp(0);
+				const char *ipname = pLengthProxy->GetName();
+				if (ipname && strcmp(ipname, "lengthproxy") == 0 && pLengthProxy->GetExtraData())
+				{
+					info->table = pTable;
+					info->prop = prop;
+					info->actual_offset = offset + *reinterpret_cast<size_t *>(reinterpret_cast<intptr_t>(pLengthProxy->GetExtraData()) + utlVecOffsetOffset);
+					return true;
+				}
+			}*/
+			info->table = pTable;
+			info->prop = prop;
+			info->actual_offset = offset + info->prop->GetOffset();
+			return true;
+		}
+		if (pInnerTable)
+		{
+			if (UTIL_FindInSendTable(pInnerTable, 
+				name,
+				info,
+				offset + prop->GetOffset())
+				)
+			{
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
+static std::unordered_map<std::string, std::unordered_map<std::string, sm_sendprop_info_ex_t>> propinfos;
+
+static bool FindSendPropInfo(ServerClass *pClass, const std::string &name, sm_sendprop_info_ex_t *info) noexcept
+{
+	auto it_props{propinfos.find(std::string{pClass->GetName()})};
+	if(it_props == propinfos.cend()) {
+		it_props = propinfos.emplace(std::pair<std::string, std::unordered_map<std::string, sm_sendprop_info_ex_t>>{name, {}}).first;
+		if(UTIL_FindInSendTable(pClass->m_pTable, name.c_str(), info, 0)) {
+			it_props->second.emplace(std::pair<std::string, sm_sendprop_info_ex_t>{name, std::move(*info)}).second;
+		}
+	}
+	if(it_props != propinfos.cend()) {
+		auto it_prop{it_props->second.find(name)};
+		if(it_prop != it_props->second.cend()) {
+			*info = it_prop->second;
+			return true;
+		}
+	}
+	return false;
+}
+
 static cell_t proxysend_hook(IPluginContext *pContext, const cell_t *params) noexcept
 {
 	int idx{gamehelpers->ReferenceToBCompatRef(params[1])};
@@ -1098,11 +1236,13 @@ static cell_t proxysend_hook(IPluginContext *pContext, const cell_t *params) noe
 
 	IServerNetworkable *pNetwork{pEntity->GetNetworkable()};
 	ServerClass *pServer{pNetwork->GetServerClass()};
+	SendTable *pClassTable{pServer->m_pTable};
 
-	sm_sendprop_info_t info{};
-	if(!gamehelpers->FindSendPropInfo(pServer->GetName(), name.c_str(), &info)) {
+	sm_sendprop_info_ex_t info{};
+	if(!FindSendPropInfo(pServer, name.c_str(), &info)) {
 		return pContext->ThrowNativeError("Could not find prop %s", name.c_str());
 	}
+	SendTable *pTable{info.table};
 
 	SendProp *pProp{info.prop};
 	prop_types type{guess_prop_type(pProp)};
@@ -1118,10 +1258,10 @@ static cell_t proxysend_hook(IPluginContext *pContext, const cell_t *params) noe
 
 	hooks_t::iterator it_hook{hooks.find(idx)};
 	if(it_hook == hooks.end()) {
-		it_hook = hooks.emplace(std::pair<int, proxyhook_t>{idx, proxyhook_t{idx}}).first;
+		it_hook = hooks.emplace(std::pair<int, proxyhook_t>{idx, proxyhook_t{idx, pClassTable}}).first;
 	}
 
-	it_hook->second.add_callback(std::move(name), callback, pProp, type, info.actual_offset, static_cast<bool>(params[4]));
+	it_hook->second.add_callback(std::move(name), callback, pTable, pProp, type, info.actual_offset, static_cast<bool>(params[4]));
 
 	return 0;
 }
