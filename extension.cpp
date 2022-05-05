@@ -282,9 +282,10 @@ struct pack_entity_params_t final
 	int current_slot{-1};
 	bool in_compute_packs{false};
 	std::vector<int> entities{};
+	CFrameSnapshot *snapshot{nullptr};
 
-	pack_entity_params_t(std::vector<int> &&slots_, std::vector<int> &&entities_) noexcept
-		: slots{std::move(slots_)}, entities{std::move(entities_)}
+	pack_entity_params_t(std::vector<int> &&slots_, std::vector<int> &&entities_, CFrameSnapshot *snapshot_) noexcept
+		: slots{std::move(slots_)}, entities{std::move(entities_)}, snapshot{snapshot_}
 	{
 		entity_data.resize(slots.size());
 		for(auto &it : entity_data) {
@@ -948,61 +949,6 @@ DETOUR_DECL_STATIC8(SendTable_CalcDelta, int, const SendTable *, pTable, const v
 	return global_nChanges;
 }
 
-DETOUR_DECL_MEMBER2(CFrameSnapshotManager_GetPackedEntity, PackedEntity *, CFrameSnapshot *, pSnapshot, int, entity)
-{
-	if(!current_packentity_params || !current_packentity_params->client) {
-		return DETOUR_MEMBER_CALL(CFrameSnapshotManager_GetPackedEntity)(pSnapshot, entity);
-	}
-
-	PackedEntity *packed{DETOUR_MEMBER_CALL(CFrameSnapshotManager_GetPackedEntity)(pSnapshot, entity)};
-	if(!packed) {
-		return nullptr;
-	}
-
-	const std::vector<int> &entities{current_packentity_params->entities};
-
-	if(std::find(entities.cbegin(), entities.cend(), entity) != entities.cend()) {
-		const int slot{current_packentity_params->client->GetPlayerSlot()};
-
-		const packed_entity_data_t *packedData{nullptr};
-		for(int i{0}; i < current_packentity_params->slots.size(); ++i) {
-			if(current_packentity_params->slots[i] == slot) {
-				for(const packed_entity_data_t &it : current_packentity_params->entity_data[i]) {
-					if(it.objectID == entity) {
-						packedData = &it;
-						break;
-					}
-				}
-				break;
-			}
-		}
-
-		if(packedData) {
-			packed->AllocAndCopyPadded(packedData->packedData.get(), packedData->writeBuf->GetNumBytesWritten());
-		}
-	}
-
-	return packed;
-}
-
-DETOUR_DECL_MEMBER4(CBaseServer_WriteDeltaEntities, void, CBaseClient *, client, CClientFrame *, to, CClientFrame *, from, bf_write &, pBuf)
-{
-	if(!current_packentity_params) {
-		DETOUR_MEMBER_CALL(CBaseServer_WriteDeltaEntities)(client, to, from, pBuf);
-		return;
-	}
-
-	if(client->IsFakeClient() ||
-		client->IsHLTV() ||
-		client->IsReplay()) {
-		current_packentity_params->client = nullptr;
-	} else {
-		current_packentity_params->client = client;
-	}
-	DETOUR_MEMBER_CALL(CBaseServer_WriteDeltaEntities)(client, to, from, pBuf);
-	current_packentity_params->client = nullptr;
-}
-
 class CFrameSnapshot
 {
 	DECLARE_FIXEDSIZE_ALLOCATOR( CFrameSnapshot );
@@ -1047,6 +993,63 @@ private:
 	// Snapshots auto-delete themselves when their refcount goes to zero.
 	CInterlockedInt			m_nReferences;
 };
+
+DETOUR_DECL_MEMBER2(CFrameSnapshotManager_GetPackedEntity, PackedEntity *, CFrameSnapshot *, pSnapshot, int, entity)
+{
+	if(!current_packentity_params || !current_packentity_params->client || !current_packentity_params->snapshot) {
+		return DETOUR_MEMBER_CALL(CFrameSnapshotManager_GetPackedEntity)(pSnapshot, entity);
+	}
+
+	PackedEntity *packed{DETOUR_MEMBER_CALL(CFrameSnapshotManager_GetPackedEntity)(pSnapshot, entity)};
+	if(!packed) {
+		return nullptr;
+	}
+
+	if(current_packentity_params->snapshot->m_ListIndex == pSnapshot->m_ListIndex) {
+		const std::vector<int> &entities{current_packentity_params->entities};
+
+		if(std::find(entities.cbegin(), entities.cend(), entity) != entities.cend()) {
+			const int slot{current_packentity_params->client->GetPlayerSlot()};
+
+			const packed_entity_data_t *packedData{nullptr};
+			for(int i{0}; i < current_packentity_params->slots.size(); ++i) {
+				if(current_packentity_params->slots[i] == slot) {
+					for(const packed_entity_data_t &it : current_packentity_params->entity_data[i]) {
+						if(it.objectID == entity) {
+							packedData = &it;
+							break;
+						}
+					}
+					break;
+				}
+			}
+
+			if(packedData) {
+				packed->AllocAndCopyPadded(packedData->packedData.get(), packedData->writeBuf->GetNumBytesWritten());
+			}
+		}
+	}
+
+	return packed;
+}
+
+DETOUR_DECL_MEMBER4(CBaseServer_WriteDeltaEntities, void, CBaseClient *, client, CClientFrame *, to, CClientFrame *, from, bf_write &, pBuf)
+{
+	if(!current_packentity_params) {
+		DETOUR_MEMBER_CALL(CBaseServer_WriteDeltaEntities)(client, to, from, pBuf);
+		return;
+	}
+
+	if(client->IsFakeClient() ||
+		client->IsHLTV() ||
+		client->IsReplay()) {
+		current_packentity_params->client = nullptr;
+	} else {
+		current_packentity_params->client = client;
+	}
+	DETOUR_MEMBER_CALL(CBaseServer_WriteDeltaEntities)(client, to, from, pBuf);
+	current_packentity_params->client = nullptr;
+}
 
 DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient **, clients, CFrameSnapshot *, snapshot)
 {
@@ -1096,7 +1099,7 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 	}
 
 	if(any_per_client && !slots.empty() && !entities.empty()) {
-		current_packentity_params = new pack_entity_params_t{std::move(slots), std::move(entities)};
+		current_packentity_params = new pack_entity_params_t{std::move(slots), std::move(entities), snapshot};
 	}
 
 	if(current_packentity_params) {
