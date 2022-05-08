@@ -44,9 +44,10 @@
  * @brief Sample implementation of the SDK Extension.
  * Note: Uncomment one of the pre-defined virtual functions in order to use it.
  */
-class Sample final : public SDKExtension, public IPluginsListener, public ISMEntityListener
+class Sample final : public SDKExtension, public IPluginsListener, public ISMEntityListener, public IConCommandBaseAccessor
 {
 public:
+	virtual bool RegisterConCommandBase(ConCommandBase *pCommand);
 	virtual void OnCoreMapEnd() noexcept override final;
 	virtual void OnPluginUnloaded(IPlugin *plugin) noexcept override final;
 	virtual void OnEntityDestroyed(CBaseEntity *pEntity) noexcept override final;

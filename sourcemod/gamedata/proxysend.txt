@@ -2,6 +2,17 @@
 {
 	"tf"
 	{
+		"Offsets"
+		{
+			"CBaseClient::UpdateSendState"
+			{
+				"linux" "46"
+			}
+			"CBaseClient::SendSnapshot"
+			{
+				"linux" "52"
+			}
+		}
 		"Signatures"
 		{
 			"SendTable_CalcDelta"
@@ -33,6 +44,26 @@
 			{
 				"library" "engine"
 				"linux" "@_ZN11CBaseServer18WriteDeltaEntitiesEP11CBaseClientP12CClientFrameS3_R8bf_write"
+			}
+			"CGameClient::GetSendFrame"
+			{
+				"library" "engine"
+				"linux" "@_ZN11CGameClient12GetSendFrameEv"
+			}
+			"SV_PackEntity"
+			{
+				"library" "engine"
+				"linux" "@_ZL13SV_PackEntityiP7edict_tP11ServerClassP14CFrameSnapshot"
+			}
+			"InvalidateSharedEdictChangeInfos"
+			{
+				"library" "engine"
+				"linux" "@_Z32InvalidateSharedEdictChangeInfosv"
+			}
+			"PackWork_t::Process"
+			{
+				"library" "engine"
+				"linux" "@_ZN10PackWork_t7ProcessERS_"
 			}
 		}
 	}
