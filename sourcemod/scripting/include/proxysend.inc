@@ -11,7 +11,7 @@ typeset proxysend_callbacks
 	function Action (int entity, const char[] prop, bool &value, int element, int client);
 	function Action (int entity, const char[] prop, float &value, int element, int client);
 	function Action (int entity, const char[] prop, float value[3], int element, int client);
-	//function Action (int entity, const char[] prop, int &r, int &g, int &b, int &a, int element, int client);
+	function Action (int entity, const char[] prop, int &r, int &g, int &b, int &a, int element, int client);
 	function Action (int entity, const char[] prop, char[] value, int size, int element, int client);
 };
 
