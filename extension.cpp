@@ -1198,7 +1198,7 @@ private:
 	callback_t() = delete;
 };
 
-using callbacks_t = std::unordered_map<std::string, callback_t>;
+using callbacks_t = std::unordered_map<const SendProp *, callback_t>;
 
 struct proxyhook_t final : table_reference_t
 {
@@ -1223,11 +1223,11 @@ struct proxyhook_t final : table_reference_t
 		}
 	}
 
-	void add_callback(std::string &&name, IPluginFunction *func, SendTable *pTable, SendProp *pProp, prop_types type, int offset, bool per_client) noexcept
+	void add_callback(SendTable *pTable, SendProp *pProp, prop_types type, int offset, IPluginFunction *func, bool per_client) noexcept
 	{
-		callbacks_t::iterator it_callback{callbacks.find(name)};
+		callbacks_t::iterator it_callback{callbacks.find(pProp)};
 		if(it_callback == callbacks.end()) {
-			it_callback = callbacks.emplace(std::pair<std::string, callback_t>{std::move(name), callback_t{index, pTable, pProp, type, offset}}).first;
+			it_callback = callbacks.emplace(std::pair<const SendProp *, callback_t>{pProp, callback_t{index, pTable, pProp, type, offset}}).first;
 		}
 
 		it_callback->second.add_function(func, per_client);
@@ -1420,8 +1420,6 @@ DETOUR_DECL_MEMBER2(CFrameSnapshotManager_GetPackedEntity, PackedEntity *, CFram
 	}
 
 	if(packentity_params->snapshot_index == pSnapshot->m_ListIndex) {
-		const std::vector<int> &entities{packentity_params->entities};
-
 		const int slot{writedeltaentities_client->GetPlayerSlot()};
 
 		const packed_entity_data_t *packedData{nullptr};
@@ -1496,54 +1494,62 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 {
 	packentity_params.reset(nullptr);
 
+	std::vector<int> slots{};
+
+	slots.reserve(clientCount);
+	for(int i{0}; i < clientCount; ++i) {
+		CGameClient *client{clients[i]};
+		if(client->IsFakeClient() ||
+			client->IsHLTV() ||
+			client->IsReplay()) {
+			continue;
+		}
+		slots.emplace_back(client->GetPlayerSlot());
+	}
+
 	std::vector<int> entities{};
 
-	const hooks_t &chooks{hooks};
-
-	entities.reserve(snapshot->m_nValidEntities);
-
-	bool any_per_client{false};
 	bool any_hook{false};
 
-	for(int i{0}; i < snapshot->m_nValidEntities; ++i) {
-		hooks_t::const_iterator it_hook{chooks.find(snapshot->m_pValidEntities[i])};
-		if(it_hook != chooks.cend()) {
-			//edict_t *edict{gamehelpers->EdictOfIndex(snapshot->m_pValidEntities[i])};
-			if(!it_hook->second.callbacks.empty()) {
-				any_hook = true;
+	if(!slots.empty()) {
+		const hooks_t &chooks{hooks};
+
+		entities.reserve(snapshot->m_nValidEntities);
+		for(int i{0}; i < snapshot->m_nValidEntities; ++i) {
+			hooks_t::const_iterator it_hook{chooks.find(snapshot->m_pValidEntities[i])};
+			if(it_hook != chooks.cend()) {
+				if(!it_hook->second.callbacks.empty()) {
+					any_hook = true;
+				}
+				bool any_per_client{false};
+				for(const auto &it_callback : it_hook->second.callbacks) {
+					if(it_callback.second.has_any_per_client_func()) {
+						any_per_client = true;
+						break;
+					}
+				}
+				if(any_per_client) {
+					entities.emplace_back(snapshot->m_pValidEntities[i]);
+				}
 			}
-			for(const auto &it_callback : it_hook->second.callbacks) {
-				//gamehelpers->SetEdictStateChanged(edict, it_callback.second.offset);
-				if(it_callback.second.has_any_per_client_func()) {
-					any_per_client = true;
+		}
+	} else {
+		const hooks_t &chooks{hooks};
+
+		for(int i{0}; i < snapshot->m_nValidEntities; ++i) {
+			hooks_t::const_iterator it_hook{chooks.find(snapshot->m_pValidEntities[i])};
+			if(it_hook != chooks.cend()) {
+				if(!it_hook->second.callbacks.empty()) {
+					any_hook = true;
 					break;
 				}
 			}
-			if(any_per_client) {
-				entities.emplace_back(snapshot->m_pValidEntities[i]);
-			}
-		}
-	}
-
-	std::vector<int> slots{};
-
-	if(any_per_client) {
-		slots.reserve(clientCount);
-
-		for(int i{0}; i < clientCount; ++i) {
-			CGameClient *client{clients[i]};
-			if(client->IsFakeClient() ||
-				client->IsHLTV() ||
-				client->IsReplay()) {
-				continue;
-			}
-			slots.emplace_back(client->GetPlayerSlot());
 		}
 	}
 
 	sv_parallel_sendsnapshot->SetValue(true);
 
-	if(any_per_client && !slots.empty() && !entities.empty()) {
+	if(!slots.empty() && !entities.empty()) {
 		packentity_params.reset(new pack_entity_params_t{std::move(slots), std::move(entities), snapshot->m_ListIndex});
 		CBaseServer_WriteDeltaEntities_detour->EnableDetour();
 		CFrameSnapshotManager_GetPackedEntity_detour->EnableDetour();
@@ -1579,9 +1585,7 @@ static void global_send_proxy(const SendProp *pProp, const void *pStructBase, co
 	const hooks_t &chooks{hooks};
 	hooks_t::const_iterator it_hook{chooks.find(objectID)};
 	if(it_hook != chooks.cend()) {
-		const char *name_ptr{pProp->GetName()};
-		const std::string prop{name_ptr};
-		callbacks_t::const_iterator it_callback{it_hook->second.callbacks.find(prop)};
+		callbacks_t::const_iterator it_callback{it_hook->second.callbacks.find(pProp)};
 		if(it_callback != it_hook->second.callbacks.cend()) {
 			restore = it_callback->second.restore;
 			const int client{callback_t::get_current_client_entity()};
@@ -1700,12 +1704,14 @@ static bool FindSendPropInfo(ServerClass *pClass, const std::string &name, sm_se
 	auto it_props{propinfos.find(std::string{pClass->GetName()})};
 	if(it_props == propinfos.cend()) {
 		it_props = propinfos.emplace(std::pair<std::string, std::unordered_map<std::string, sm_sendprop_info_ex_t>>{name, {}}).first;
-		if(UTIL_FindInSendTable(pClass->m_pTable, name.c_str(), info, 0)) {
-			it_props->second.emplace(std::pair<std::string, sm_sendprop_info_ex_t>{name, std::move(*info)}).second;
-		}
 	}
 	if(it_props != propinfos.cend()) {
 		auto it_prop{it_props->second.find(name)};
+		if(it_prop == it_props->second.cend()) {
+			if(UTIL_FindInSendTable(pClass->m_pTable, name.c_str(), info, 0)) {
+				it_prop = it_props->second.emplace(std::pair<std::string, sm_sendprop_info_ex_t>{name, std::move(*info)}).first;
+			}
+		}
 		if(it_prop != it_props->second.cend()) {
 			*info = it_prop->second;
 			return true;
@@ -1724,14 +1730,14 @@ static cell_t proxysend_hook(IPluginContext *pContext, const cell_t *params) noe
 
 	char *name_ptr;
 	pContext->LocalToString(params[2], &name_ptr);
-	std::string name{name_ptr};
+	const std::string name{name_ptr};
 
 	IServerNetworkable *pNetwork{pEntity->GetNetworkable()};
 	ServerClass *pServer{pNetwork->GetServerClass()};
 	SendTable *pClassTable{pServer->m_pTable};
 
 	sm_sendprop_info_ex_t info{};
-	if(!FindSendPropInfo(pServer, name.c_str(), &info)) {
+	if(!FindSendPropInfo(pServer, name, &info)) {
 		return pContext->ThrowNativeError("Could not find prop %s", name.c_str());
 	}
 	SendTable *pTable{info.table};
@@ -1753,7 +1759,7 @@ static cell_t proxysend_hook(IPluginContext *pContext, const cell_t *params) noe
 		it_hook = hooks.emplace(std::pair<int, proxyhook_t>{idx, proxyhook_t{idx, pClassTable}}).first;
 	}
 
-	it_hook->second.add_callback(std::move(name), callback, pTable, pProp, type, info.actual_offset, static_cast<bool>(params[4]));
+	it_hook->second.add_callback(pTable, pProp, type, info.actual_offset, callback, static_cast<bool>(params[4]));
 
 	return 0;
 }
@@ -1771,17 +1777,23 @@ static cell_t proxysend_unhook(IPluginContext *pContext, const cell_t *params) n
 
 	char *name_ptr;
 	pContext->LocalToString(params[2], &name_ptr);
-	const std::string name{name_ptr};
+
+	sm_sendprop_info_t info{};
+	if(!gamehelpers->FindSendPropInfo(pServer->GetName(), name_ptr, &info)) {
+		return pContext->ThrowNativeError("Could not find prop %s", name_ptr);
+	}
+
+	const SendProp *pProp{info.prop};
 
 	IPluginFunction *callback{pContext->GetFunctionById(params[3])};
 
 	hooks_t::iterator it_hook{hooks.find(idx)};
 	if(it_hook != hooks.end()) {
-		callbacks_t::iterator it_callback{it_hook->second.callbacks.find(name)};
+		callbacks_t::iterator it_callback{it_hook->second.callbacks.find(pProp)};
 		if(it_callback != it_hook->second.callbacks.end()) {
 			it_callback->second.remove_function(callback);
 		#ifdef _DEBUG
-			printf("removed %s hook for %i\n", name.c_str(), idx);
+			printf("removed %s hook for %i\n", name_ptr, idx);
 		#endif
 			if(it_callback->second.fwd->GetFunctionCount() == 0) {
 				it_hook->second.callbacks.erase(it_callback);
