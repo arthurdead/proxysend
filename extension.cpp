@@ -1271,8 +1271,7 @@ DETOUR_DECL_STATIC6(SendTable_Encode, bool, const SendTable *, pTable, const voi
 	}
 
 	{
-		bool encoded{DETOUR_STATIC_CALL(SendTable_Encode)(pTable, pStruct, pOut, objectID, pRecipients, bNonZeroOnly)};
-		if(!encoded) {
+		if(!DETOUR_STATIC_CALL(SendTable_Encode)(pTable, pStruct, pOut, objectID, pRecipients, bNonZeroOnly)) {
 			Host_Error( "SV_PackEntity: SendTable_Encode returned false (ent %d).\n", objectID );
 			return false;
 		}
@@ -1281,21 +1280,24 @@ DETOUR_DECL_STATIC6(SendTable_Encode, bool, const SendTable *, pTable, const voi
 	const std::vector<int> &entities{packentity_params->entities};
 
 	if(std::find(entities.cbegin(), entities.cend(), objectID) != entities.cend()) {
-		for(int i{0}; i < packentity_params->slots.size(); ++i) {
+		const std::size_t slots_size{packentity_params->slots.size()};
+		for(int i{0}; i < slots_size; ++i) {
 			packed_entity_data_t &packedData{packentity_params->entity_data[i].emplace_back()};
 
 			packedData.objectID = objectID;
 			packedData.allocate();
 
 			sendproxy_client_slot = packentity_params->slots[i];
-			bool encoded{DETOUR_STATIC_CALL(SendTable_Encode)(pTable, pStruct, packedData.writeBuf.get(), objectID, pRecipients, bNonZeroOnly)};
+			const bool encoded{DETOUR_STATIC_CALL(SendTable_Encode)(pTable, pStruct, packedData.writeBuf.get(), objectID, pRecipients, bNonZeroOnly)};
 			sendproxy_client_slot = nullptr;
 			if(!encoded) {
 				Host_Error( "SV_PackEntity: SendTable_Encode returned false (ent %d).\n", objectID );
 				return false;
 			}
 		}
-		do_calc_delta = true;
+		if(slots_size > 0) {
+			do_calc_delta = true;
+		}
 	}
 
 	return true;
@@ -1312,8 +1314,6 @@ DETOUR_DECL_STATIC8(SendTable_CalcDelta, int, const SendTable *, pTable, const v
 	int global_nChanges{DETOUR_STATIC_CALL(SendTable_CalcDelta)(pTable, pFromState, nFromBits, pToState, nToBits, pDeltaProps, nMaxDeltaProps, objectID)};
 
 	if(do_calc_delta) {
-		bool any_changed{global_nChanges > 0};
-
 		if(global_nChanges < nMaxDeltaProps) {
 			std::unique_ptr<int[]> client_deltaProps{new int[nMaxDeltaProps]{static_cast<unsigned int>(-1)}};
 
@@ -1321,6 +1321,8 @@ DETOUR_DECL_STATIC8(SendTable_CalcDelta, int, const SendTable *, pTable, const v
 				packed_entity_data_t &packedData{packentity_params->entity_data[i].back()};
 
 				const int client_nChanges{DETOUR_STATIC_CALL(SendTable_CalcDelta)(pTable, pFromState, nFromBits, packedData.packedData.get(), packedData.writeBuf->GetNumBitsWritten(), client_deltaProps.get(), nMaxDeltaProps, objectID)};
+
+				bool done{false};
 
 				for(int j{0}; j < client_nChanges; ++j) {
 					bool found{false};
@@ -1331,27 +1333,19 @@ DETOUR_DECL_STATIC8(SendTable_CalcDelta, int, const SendTable *, pTable, const v
 						}
 					}
 					if(!found) {
-						any_changed = true;
 						pDeltaProps[global_nChanges++] = client_deltaProps[j];
 						if(global_nChanges >= nMaxDeltaProps) {
+							done = true;
 							break;
 						}
 					}
 				}
 
-				if(global_nChanges >= nMaxDeltaProps) {
+				if(done) {
 					break;
 				}
 			}
 		}
-
-		if(any_changed) {
-			edict_t *edict{gamehelpers->EdictOfIndex(objectID)};
-			if(edict) {
-				edict->m_fStateFlags |= FL_EDICT_CHANGED;
-			}
-		}
-
 		do_calc_delta = nullptr;
 	}
 
@@ -1511,37 +1505,31 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 
 	bool any_hook{false};
 
-	if(!slots.empty()) {
-		const hooks_t &chooks{hooks};
+	const hooks_t &chooks{hooks};
 
+	if(!slots.empty()) {
 		entities.reserve(snapshot->m_nValidEntities);
-		for(int i{0}; i < snapshot->m_nValidEntities; ++i) {
-			hooks_t::const_iterator it_hook{chooks.find(snapshot->m_pValidEntities[i])};
-			if(it_hook != chooks.cend()) {
-				if(!it_hook->second.callbacks.empty()) {
-					any_hook = true;
+	}
+
+	for(int i{0}; i < snapshot->m_nValidEntities; ++i) {
+		hooks_t::const_iterator it_hook{chooks.find(snapshot->m_pValidEntities[i])};
+		if(it_hook != chooks.cend()) {
+			if(!it_hook->second.callbacks.empty()) {
+				any_hook = true;
+				if(slots.empty()) {
+					break;
 				}
-				bool any_per_client{false};
+			}
+			if(!slots.empty()) {
+				bool any_per_client_func{false};
 				for(const auto &it_callback : it_hook->second.callbacks) {
 					if(it_callback.second.has_any_per_client_func()) {
-						any_per_client = true;
+						any_per_client_func = true;
 						break;
 					}
 				}
-				if(any_per_client) {
+				if(any_per_client_func) {
 					entities.emplace_back(snapshot->m_pValidEntities[i]);
-				}
-			}
-		}
-	} else {
-		const hooks_t &chooks{hooks};
-
-		for(int i{0}; i < snapshot->m_nValidEntities; ++i) {
-			hooks_t::const_iterator it_hook{chooks.find(snapshot->m_pValidEntities[i])};
-			if(it_hook != chooks.cend()) {
-				if(!it_hook->second.callbacks.empty()) {
-					any_hook = true;
-					break;
 				}
 			}
 		}
@@ -1549,30 +1537,28 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 
 	sv_parallel_sendsnapshot->SetValue(true);
 
-	if(!slots.empty() && !entities.empty()) {
+	const bool any_per_client_hook{!slots.empty() && !entities.empty()};
+
+	if(any_per_client_hook) {
 		packentity_params.reset(new pack_entity_params_t{std::move(slots), std::move(entities), snapshot->m_ListIndex});
+		SendTable_Encode_detour->EnableDetour();
+		SendTable_CalcDelta_detour->EnableDetour();
 		CBaseServer_WriteDeltaEntities_detour->EnableDetour();
 		CFrameSnapshotManager_GetPackedEntity_detour->EnableDetour();
 	} else {
 		CBaseServer_WriteDeltaEntities_detour->DisableDetour();
 		CFrameSnapshotManager_GetPackedEntity_detour->DisableDetour();
-	}
-
-	sv_parallel_packentities->SetValue(!any_hook);
-
-	if(any_hook) {
-		SendTable_Encode_detour->EnableDetour();
-		SendTable_CalcDelta_detour->EnableDetour();
-	} else {
 		SendTable_Encode_detour->DisableDetour();
 		SendTable_CalcDelta_detour->DisableDetour();
 	}
+
+	sv_parallel_packentities->SetValue(!any_hook);
 
 	in_compute_packs = true;
 	DETOUR_STATIC_CALL(SV_ComputeClientPacks)(clientCount, clients, snapshot);
 	in_compute_packs = false;
 
-	if(!sv_parallel_packentities->GetBool() && any_hook) {
+	if(!sv_parallel_packentities->GetBool() && any_per_client_hook) {
 		SendTable_Encode_detour->DisableDetour();
 		SendTable_CalcDelta_detour->DisableDetour();
 	}
@@ -1906,13 +1892,15 @@ bool Sample::SDK_OnMetamodLoad(ISmmAPI *ismm, char *error, size_t maxlen, bool l
 
 void Sample::OnCoreMapEnd() noexcept
 {
+	hooks.clear();
 	tables.clear();
 	restores.clear();
-	hooks.clear();
 }
 
 void Sample::SDK_OnUnload() noexcept
 {
+	OnCoreMapEnd();
+
 	SendTable_CalcDelta_detour->Destroy();
 	SendTable_Encode_detour->Destroy();
 	SV_ComputeClientPacks_detour->Destroy();
@@ -1922,10 +1910,6 @@ void Sample::SDK_OnUnload() noexcept
 	CGameServer_SendClientMessages_detour->Destroy();
 	CFrameSnapshotManager_GetPackedEntity_detour->Destroy();
 	CBaseServer_WriteDeltaEntities_detour->Destroy();
-
-	tables.clear();
-	restores.clear();
-	hooks.clear();
 
 	gameconfs->CloseGameConfigFile(gameconf);
 
