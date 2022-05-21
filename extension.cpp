@@ -150,48 +150,6 @@ static void global_send_proxy(const SendProp *pProp, const void *pStructBase, co
 using tables_t = std::unordered_map<const SendTable *, std::unique_ptr<std::size_t>>;
 static tables_t tables;
 
-struct proxyrestore_t final
-{
-	inline proxyrestore_t(proxyrestore_t &&other) noexcept
-	{ operator=(std::move(other)); }
-
-	proxyrestore_t(SendProp *pProp_) noexcept
-		: pProp{pProp_}, pRealProxy{pProp->GetProxyFn()}
-	{
-	#ifdef _DEBUG
-		printf("set %s proxy func\n", pProp->GetName());
-	#endif
-		pProp->SetProxyFn(global_send_proxy);
-	}
-
-	~proxyrestore_t() noexcept {
-		if(pProp && pRealProxy) {
-		#ifdef _DEBUG
-			printf("reset %s proxy func\n", pProp->GetName());
-		#endif
-			pProp->SetProxyFn(pRealProxy);
-		}
-	}
-
-	proxyrestore_t &operator=(proxyrestore_t &&other) noexcept
-	{
-		pProp = other.pProp;
-		other.pProp = nullptr;
-		pRealProxy = other.pRealProxy;
-		other.pRealProxy = nullptr;
-		return *this;
-	}
-
-	SendProp *pProp{nullptr};
-	SendVarProxyFn pRealProxy{nullptr};
-	std::size_t ref{0};
-
-private:
-	proxyrestore_t(const proxyrestore_t &) = delete;
-	proxyrestore_t &operator=(const proxyrestore_t &) = delete;
-	proxyrestore_t() = delete;
-};
-
 static const CStandardSendProxies *std_proxies;
 
 static const SendProp *m_nPlayerCond{nullptr};
@@ -222,6 +180,12 @@ static prop_types guess_prop_type(const SendProp *pProp, const SendTable *pTable
 	switch(pProp->GetType()) {
 		case DPT_Int: {
 			SendVarProxyFn pRealProxy{pProp->GetProxyFn()};
+			if(pRealProxy == global_send_proxy) {
+			#if defined _DEBUG
+				printf("invalid (global send proxy)\n");
+			#endif
+				return prop_types::unknown;
+			}
 			if(pProp->GetFlags() & SPROP_UNSIGNED) {
 				if(pRealProxy == std_proxies->m_UInt8ToInt32) {
 					if(pProp->m_nBits == 1) {
@@ -332,7 +296,7 @@ static prop_types guess_prop_type(const SendProp *pProp, const SendTable *pTable
 			}
 		}
 		case DPT_Float:
-		{ return prop_types::float_; }
+		return prop_types::float_;
 		case DPT_Vector: {
 			if(pProp->m_fLowValue == 0.0f && pProp->m_fHighValue == 360.0f) {
 				return prop_types::qangle;
@@ -341,17 +305,61 @@ static prop_types guess_prop_type(const SendProp *pProp, const SendTable *pTable
 			}
 		}
 		case DPT_VectorXY:
-		{ return prop_types::vector; }
+		return prop_types::vector;
 		case DPT_String:
-		{ return prop_types::cstring; }
+		return prop_types::cstring;
 		case DPT_Array:
-		{ return prop_types::unknown; }
+		return prop_types::unknown;
 		case DPT_DataTable:
-		{ return prop_types::unknown; }
+		return prop_types::unknown;
 	}
 
 	return prop_types::unknown;
 }
+
+struct proxyrestore_t final
+{
+	inline proxyrestore_t(proxyrestore_t &&other) noexcept
+	{ operator=(std::move(other)); }
+
+	proxyrestore_t(SendProp *pProp_, prop_types type_) noexcept
+		: pProp{pProp_}, pRealProxy{pProp->GetProxyFn()}, type{type_}
+	{
+	#ifdef _DEBUG
+		printf("set %s proxy func\n", pProp->GetName());
+	#endif
+		pProp->SetProxyFn(global_send_proxy);
+	}
+
+	~proxyrestore_t() noexcept {
+		if(pProp && pRealProxy) {
+		#ifdef _DEBUG
+			printf("reset %s proxy func\n", pProp->GetName());
+		#endif
+			pProp->SetProxyFn(pRealProxy);
+		}
+	}
+
+	proxyrestore_t &operator=(proxyrestore_t &&other) noexcept
+	{
+		pProp = other.pProp;
+		other.pProp = nullptr;
+		pRealProxy = other.pRealProxy;
+		other.pRealProxy = nullptr;
+		type = other.type;
+		return *this;
+	}
+
+	SendProp *pProp{nullptr};
+	SendVarProxyFn pRealProxy{nullptr};
+	std::size_t ref{0};
+	prop_types type{prop_types::unknown};
+
+private:
+	proxyrestore_t(const proxyrestore_t &) = delete;
+	proxyrestore_t &operator=(const proxyrestore_t &) = delete;
+	proxyrestore_t() = delete;
+};
 
 template <typename T>
 class thread_var_base
@@ -677,11 +685,11 @@ private:
 
 struct prop_reference_t
 {
-	prop_reference_t(SendProp *pProp) noexcept
+	prop_reference_t(SendProp *pProp, prop_types type) noexcept
 	{
 		restores_t::iterator it_restore{restores.find(pProp)};
 		if(it_restore == restores.end()) {
-			it_restore = restores.emplace(std::pair<SendProp *, std::unique_ptr<proxyrestore_t>>{pProp, new proxyrestore_t{pProp}}).first;
+			it_restore = restores.emplace(std::pair<SendProp *, std::unique_ptr<proxyrestore_t>>{pProp, new proxyrestore_t{pProp, type}}).first;
 		}
 		restore = it_restore->second.get();
 		++restore->ref;
@@ -797,7 +805,7 @@ private:
 struct callback_t final : prop_reference_t
 {
 	callback_t(int index_, SendTable *pTable, SendProp *pProp, prop_types type_, std::size_t offset_) noexcept
-		: prop_reference_t{pProp}, offset{offset_}, type{type_}, table{pTable}, prop{pProp}, index{index_}
+		: prop_reference_t{pProp, type_}, offset{offset_}, type{type_}, table{pTable}, prop{pProp}, index{index_}
 	{
 		if(type == prop_types::cstring) {
 			fwd = forwards->CreateForwardEx(nullptr, ET_Hook, 6, nullptr, Param_Cell, Param_String, Param_String, Param_Cell, Param_Cell, Param_Cell);
@@ -909,8 +917,7 @@ struct callback_t final : prop_reference_t
 
 	static int get_current_client_slot() noexcept
 	{
-		if(!sendproxy_client_slot ||
-			sendproxy_client_slot == -1) {
+		if(!sendproxy_client_slot) {
 			return -1;
 		}
 
@@ -1078,45 +1085,32 @@ struct callback_t final : prop_reference_t
 	bool fwd_call(int client, const SendProp *pProp, const void *old_pData, opaque_ptr &new_pData, int iElement, int objectID) const noexcept
 	{
 		switch(type) {
-			case prop_types::int_: {
-				return fwd_call_int<int>(client, pProp, old_pData, new_pData, iElement, objectID);
-			} break;
-			case prop_types::bool_: {
-				return fwd_call_int<bool>(client, pProp, old_pData, new_pData, iElement, objectID);
-			} break;
-			case prop_types::short_: {
-				return fwd_call_int<short>(client, pProp, old_pData, new_pData, iElement, objectID);
-			} break;
-			case prop_types::char_: {
-				return fwd_call_int<char>(client, pProp, old_pData, new_pData, iElement, objectID);
-			} break;
-			case prop_types::unsigned_int: {
-				return fwd_call_int<unsigned int>(client, pProp, old_pData, new_pData, iElement, objectID);
-			} break;
-			case prop_types::unsigned_short: {
-				return fwd_call_int<unsigned short>(client, pProp, old_pData, new_pData, iElement, objectID);
-			} break;
-			case prop_types::unsigned_char: {
-				return fwd_call_int<unsigned char>(client, pProp, old_pData, new_pData, iElement, objectID);
-			} break;
-			case prop_types::float_: {
-				return fwd_call_float(client, pProp, old_pData, new_pData, iElement, objectID);
-			} break;
-			case prop_types::vector: {
-				return fwd_call_vec<Vector>(client, pProp, old_pData, new_pData, iElement, objectID);
-			} break;
-			case prop_types::qangle: {
-				return fwd_call_vec<QAngle>(client, pProp, old_pData, new_pData, iElement, objectID);
-			} break;
-			case prop_types::color32_: {
-				return fwd_call_color32(client, pProp, old_pData, new_pData, iElement, objectID);
-			} break;
-			case prop_types::ehandle: {
-				return fwd_call_ehandle(client, pProp, old_pData, new_pData, iElement, objectID);
-			} break;
-			case prop_types::cstring: {
-				return fwd_call_str(client, pProp, old_pData, new_pData, iElement, objectID);
-			} break;
+			case prop_types::int_:
+			return fwd_call_int<int>(client, pProp, old_pData, new_pData, iElement, objectID);
+			case prop_types::bool_:
+			return fwd_call_int<bool>(client, pProp, old_pData, new_pData, iElement, objectID);
+			case prop_types::short_:
+			return fwd_call_int<short>(client, pProp, old_pData, new_pData, iElement, objectID);
+			case prop_types::char_:
+			return fwd_call_int<char>(client, pProp, old_pData, new_pData, iElement, objectID);
+			case prop_types::unsigned_int:
+			return fwd_call_int<unsigned int>(client, pProp, old_pData, new_pData, iElement, objectID);
+			case prop_types::unsigned_short:
+			return fwd_call_int<unsigned short>(client, pProp, old_pData, new_pData, iElement, objectID);
+			case prop_types::unsigned_char:
+			return fwd_call_int<unsigned char>(client, pProp, old_pData, new_pData, iElement, objectID);
+			case prop_types::float_:
+			return fwd_call_float(client, pProp, old_pData, new_pData, iElement, objectID);
+			case prop_types::vector:
+			return fwd_call_vec<Vector>(client, pProp, old_pData, new_pData, iElement, objectID);
+			case prop_types::qangle:
+			return fwd_call_vec<QAngle>(client, pProp, old_pData, new_pData, iElement, objectID);
+			case prop_types::color32_:
+			return fwd_call_color32(client, pProp, old_pData, new_pData, iElement, objectID);
+			case prop_types::ehandle:
+			return fwd_call_ehandle(client, pProp, old_pData, new_pData, iElement, objectID);
+			case prop_types::cstring:
+			return fwd_call_str(client, pProp, old_pData, new_pData, iElement, objectID);
 		}
 		return false;
 	}
@@ -1210,17 +1204,8 @@ struct proxyhook_t final : table_reference_t
 	{
 	}
 
-	~proxyhook_t() noexcept
+	inline ~proxyhook_t() noexcept
 	{
-		if(index != -1) {
-			edict_t *edict{gamehelpers->EdictOfIndex(index)};
-			if(edict) {
-				for(callbacks_t::value_type &it : callbacks) {
-					gamehelpers->SetEdictStateChanged(edict, it.second.offset);
-					it.second.index = -1;
-				}
-			}
-		}
 	}
 
 	void add_callback(SendTable *pTable, SendProp *pProp, prop_types type, int offset, IPluginFunction *func, bool per_client) noexcept
@@ -1729,7 +1714,13 @@ static cell_t proxysend_hook(IPluginContext *pContext, const cell_t *params) noe
 	SendTable *pTable{info.table};
 
 	SendProp *pProp{info.prop};
-	prop_types type{guess_prop_type(pProp, pTable)};
+	prop_types type{prop_types::unknown};
+	restores_t::const_iterator it_restore{restores.find(pProp)};
+	if(it_restore != restores.cend()) {
+		type = it_restore->second->type;
+	} else {
+		type = guess_prop_type(pProp, pTable);
+	}
 	if(type == prop_types::unknown) {
 		return pContext->ThrowNativeError("Unsupported prop");
 	}
@@ -1904,9 +1895,9 @@ void Sample::SDK_OnUnload() noexcept
 	SendTable_CalcDelta_detour->Destroy();
 	SendTable_Encode_detour->Destroy();
 	SV_ComputeClientPacks_detour->Destroy();
-	SV_PackEntity_detour->Destroy();
-	PackWork_tProcess_detour->Destroy();
-	InvalidateSharedEdictChangeInfos_detour->Destroy();
+	//SV_PackEntity_detour->Destroy();
+	//PackWork_tProcess_detour->Destroy();
+	//InvalidateSharedEdictChangeInfos_detour->Destroy();
 	CGameServer_SendClientMessages_detour->Destroy();
 	CFrameSnapshotManager_GetPackedEntity_detour->Destroy();
 	CBaseServer_WriteDeltaEntities_detour->Destroy();
