@@ -159,18 +159,23 @@ static const SendProp *m_nPlayerCondEx2{nullptr};
 static const SendProp *m_nPlayerCondEx3{nullptr};
 static const SendProp *m_nPlayerCondEx4{nullptr};
 
+static bool is_prop_cond(const SendProp *pProp)
+{
+	return (pProp == m_nPlayerCond ||
+			pProp == _condition_bits ||
+			pProp == m_nPlayerCondEx ||
+			pProp == m_nPlayerCondEx2 ||
+			pProp == m_nPlayerCondEx3 ||
+			pProp == m_nPlayerCondEx4);
+}
+
 static prop_types guess_prop_type(const SendProp *pProp, const SendTable *pTable) noexcept
 {
 #if defined _DEBUG
 	printf("%s type is ", pProp->GetName());
 #endif
 
-	if(pProp == m_nPlayerCond ||
-		pProp == _condition_bits ||
-		pProp == m_nPlayerCondEx ||
-		pProp == m_nPlayerCondEx2 ||
-		pProp == m_nPlayerCondEx3 ||
-		pProp == m_nPlayerCondEx4) {
+	if(is_prop_cond(pProp)) {
 	#if defined _DEBUG
 		printf("unsigned int (is cond)\n");
 	#endif
@@ -1115,17 +1120,14 @@ struct callback_t final : prop_reference_t
 		return false;
 	}
 
-	void proxy_call(const SendProp *pProp, const void *pStructBase, const void *pData, DVariant *pOut, int iElement, int objectID) const noexcept
+	void proxy_call(const SendProp *pProp, const void *pStructBase, const void *pOldData, const void *pNewData, DVariant *pOut, int iElement, int objectID) const noexcept
 	{
-		if(pProp == m_nPlayerCond ||
-			pProp == _condition_bits ||
-			pProp == m_nPlayerCondEx ||
-			pProp == m_nPlayerCondEx2 ||
-			pProp == m_nPlayerCondEx3 ||
-			pProp == m_nPlayerCondEx4) {
-			std_proxies->m_UInt32ToInt32(pProp, pStructBase, pData, pOut, iElement, objectID);
+		if(is_prop_cond(pProp)) {
+			DVariant ignore{};
+			restore->pRealProxy(nullptr, nullptr, pOldData, &ignore, -1, -1);
+			std_proxies->m_UInt32ToInt32(pProp, pStructBase, pNewData, pOut, iElement, objectID);
 		} else {
-			restore->pRealProxy(pProp, pStructBase, pData, pOut, iElement, objectID);
+			restore->pRealProxy(pProp, pStructBase, pNewData, pOut, iElement, objectID);
 		}
 	}
 
@@ -1564,7 +1566,7 @@ static void global_send_proxy(const SendProp *pProp, const void *pStructBase, co
 				if(std::this_thread::get_id() == main_thread_id) {
 					opaque_ptr new_data{};
 					if(it_callback->second.fwd_call(client, pProp, pData, new_data, iElement, objectID)) {
-						it_callback->second.proxy_call(pProp, pStructBase, new_data.get(), pOut, iElement, objectID);
+						it_callback->second.proxy_call(pProp, pStructBase, pData, new_data.get(), pOut, iElement, objectID);
 						return;
 					}
 				}
