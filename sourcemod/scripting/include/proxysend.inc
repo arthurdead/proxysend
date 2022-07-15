@@ -74,7 +74,8 @@ stock void proxysend_unhook_cond(int entity, TFCond cond, proxysend_callbacks ca
 #if !defined REQUIRE_EXTENSIONS
 public __ext_proxysend_SetNTVOptional()
 {
-	
+	MarkNativeAsOptional("proxysend_hook");
+	MarkNativeAsOptional("proxysend_unhook");
 }
 #endif
 
