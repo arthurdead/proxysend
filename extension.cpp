@@ -1424,6 +1424,8 @@ DETOUR_DECL_MEMBER2(CFrameSnapshotManager_GetPackedEntity, PackedEntity *, CFram
 	return packed;
 }
 
+static ConVar *sv_stressbots{nullptr};
+
 DETOUR_DECL_MEMBER4(CBaseServer_WriteDeltaEntities, void, CBaseClient *, client, CClientFrame *, to, CClientFrame *, from, bf_write &, pBuf)
 {
 	std::lock_guard<std::recursive_mutex> lck{packentity_mux};
@@ -1433,9 +1435,10 @@ DETOUR_DECL_MEMBER4(CBaseServer_WriteDeltaEntities, void, CBaseClient *, client,
 		return;
 	}
 
-	if(client->IsFakeClient() ||
+	if(!sv_stressbots->GetBool() &&
+		(client->IsFakeClient() ||
 		client->IsHLTV() ||
-		client->IsReplay()) {
+		client->IsReplay())) {
 		writedeltaentities_client = nullptr;
 	} else {
 		writedeltaentities_client = client;
@@ -1480,9 +1483,10 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 	slots.reserve(clientCount);
 	for(int i{0}; i < clientCount; ++i) {
 		CGameClient *client{clients[i]};
-		if(client->IsFakeClient() ||
+		if(!sv_stressbots->GetBool() &&
+			(client->IsFakeClient() ||
 			client->IsHLTV() ||
-			client->IsReplay()) {
+			client->IsReplay())) {
 			continue;
 		}
 		slots.emplace_back(client->GetPlayerSlot());
@@ -1879,6 +1883,7 @@ bool Sample::SDK_OnMetamodLoad(ISmmAPI *ismm, char *error, size_t maxlen, bool l
 
 	sv_parallel_packentities = g_pCVar->FindVar("sv_parallel_packentities");
 	sv_parallel_sendsnapshot = g_pCVar->FindVar("sv_parallel_sendsnapshot");
+	sv_stressbots = g_pCVar->FindVar("sv_stressbots");
 
 	return true;
 }
