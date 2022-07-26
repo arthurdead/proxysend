@@ -39,14 +39,22 @@
 
 #include "smsdk_ext.h"
 #include <ISDKHooks.h>
+#include "public/proxysend.hpp"
 
 /**
  * @brief Sample implementation of the SDK Extension.
  * Note: Uncomment one of the pre-defined virtual functions in order to use it.
  */
-class Sample final : public SDKExtension, public IPluginsListener, public ISMEntityListener, public IConCommandBaseAccessor
+class Sample final : public SDKExtension, public IPluginsListener, public ISMEntityListener, public IConCommandBaseAccessor, public proxysend
 {
 public:
+	std::vector<const parallel_pack_listener *> pack_ent_listeners;
+
+	bool add_listener(const parallel_pack_listener *ptr) noexcept override final;
+	bool remove_listener(const parallel_pack_listener *ptr) noexcept override final;
+
+	bool is_parallel_pack_allowed() const noexcept;
+
 	virtual bool RegisterConCommandBase(ConCommandBase *pCommand);
 	virtual void OnCoreMapEnd() noexcept override final;
 	virtual void OnPluginUnloaded(IPlugin *plugin) noexcept override final;

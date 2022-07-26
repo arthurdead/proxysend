@@ -401,13 +401,14 @@ protected:
 	static constexpr const pthread_key_t invalid_key{PTHREAD_KEYS_MAX+1};
 
 	pthread_key_t key{invalid_key};
+	bool allocated_{false};
 
 	static void dtor(void *ptr) noexcept
 	{ delete reinterpret_cast<T *>(ptr); }
 
 	T *get_ptr_raw() const noexcept
 	{
-		if(key == invalid_key) {
+		if(!allocated_) {
 			return nullptr;
 		}
 		return reinterpret_cast<T *>(pthread_getspecific(key));
@@ -426,23 +427,24 @@ protected:
 		}
 	}
 
+	bool allocate() noexcept
+	{
+		if(!__sync_bool_compare_and_swap(&allocated_, 0, 1)) {
+			return true;
+		}
+		return (pthread_key_create(&key, dtor) == 0);
+	}
+
 	void reset_ptr(T *ptr) noexcept
 	{
 		T *old_ptr{get_ptr_raw()};
 		if(old_ptr) {
 			delete old_ptr;
 		}
-		if(ptr) {
-			if(key == invalid_key) {
-				pthread_key_create(&key, dtor);
-			}
-			pthread_setspecific(key, ptr);
-		} else {
-			if(key != invalid_key) {
-				pthread_key_delete(key);
-			}
-			key = invalid_key;
+		if(!allocated_ && !allocate()) {
+			return;
 		}
+		pthread_setspecific(key, ptr);
 	}
 
 private:
@@ -618,11 +620,10 @@ private:
 
 static thread_var<bool> in_compute_packs;
 static thread_var<bool> do_calc_delta;
-static thread_var<CBaseClient *> writedeltaentities_client;
+static thread_var<int> writedeltaentities_client;
 static thread_var<int> sendproxy_client_slot;
 
 static std::unique_ptr<pack_entity_params_t> packentity_params;
-static std::recursive_mutex packentity_mux;
 
 static void Host_Error(const char *error, ...) noexcept
 {
@@ -1243,8 +1244,6 @@ static hooks_t hooks;
 
 DETOUR_DECL_STATIC6(SendTable_Encode, bool, const SendTable *, pTable, const void *, pStruct, bf_write *, pOut, int, objectID, CUtlMemory<CSendProxyRecipients> *, pRecipients, bool, bNonZeroOnly)
 {
-	std::lock_guard<std::recursive_mutex> lck{packentity_mux};
-
 #if 0
 	const tables_t &ctables{tables};
 
@@ -1292,8 +1291,6 @@ DETOUR_DECL_STATIC6(SendTable_Encode, bool, const SendTable *, pTable, const voi
 
 DETOUR_DECL_STATIC8(SendTable_CalcDelta, int, const SendTable *, pTable, const void *, pFromState, const int, nFromBits, const void *, pToState, const int, nToBits, int *, pDeltaProps, int, nMaxDeltaProps, const int, objectID)
 {
-	std::lock_guard<std::recursive_mutex> lck{packentity_mux};
-
 	if(!packentity_params || !in_compute_packs) {
 		return DETOUR_STATIC_CALL(SendTable_CalcDelta)(pTable, pFromState, nFromBits, pToState, nToBits, pDeltaProps, nMaxDeltaProps, objectID);
 	}
@@ -1389,9 +1386,7 @@ private:
 
 DETOUR_DECL_MEMBER2(CFrameSnapshotManager_GetPackedEntity, PackedEntity *, CFrameSnapshot *, pSnapshot, int, entity)
 {
-	std::lock_guard<std::recursive_mutex> lck{packentity_mux};
-
-	if(!packentity_params || !writedeltaentities_client || packentity_params->snapshot_index == -1) {
+	if(!packentity_params || !writedeltaentities_client || packentity_params->snapshot_index != pSnapshot->m_ListIndex) {
 		return DETOUR_MEMBER_CALL(CFrameSnapshotManager_GetPackedEntity)(pSnapshot, entity);
 	}
 
@@ -1400,25 +1395,27 @@ DETOUR_DECL_MEMBER2(CFrameSnapshotManager_GetPackedEntity, PackedEntity *, CFram
 		return nullptr;
 	}
 
-	if(packentity_params->snapshot_index == pSnapshot->m_ListIndex) {
-		const int slot{writedeltaentities_client->GetPlayerSlot()};
+	const int slot{writedeltaentities_client};
 
-		const packed_entity_data_t *packedData{nullptr};
-		for(int i{0}; i < packentity_params->slots.size(); ++i) {
-			if(packentity_params->slots[i] == slot) {
-				for(const packed_entity_data_t &it : packentity_params->entity_data[i]) {
-					if(it.objectID == entity) {
-						packedData = &it;
-						break;
-					}
+	const packed_entity_data_t *packedData{nullptr};
+	for(int i{0}; i < packentity_params->slots.size(); ++i) {
+		if(packentity_params->slots[i] == slot) {
+			for(const packed_entity_data_t &it : packentity_params->entity_data[i]) {
+				if(it.objectID == entity) {
+					packedData = &it;
+					break;
 				}
-				break;
 			}
+			break;
+		}
+	}
+
+	if(packedData) {
+		if(packed->GetData()) {
+			packed->FreeData();
 		}
 
-		if(packedData) {
-			packed->AllocAndCopyPadded(packedData->packedData.get(), packedData->writeBuf->GetNumBytesWritten());
-		}
+		packed->AllocAndCopyPadded(packedData->packedData.get(), packedData->writeBuf->GetNumBytesWritten());
 	}
 
 	return packed;
@@ -1428,20 +1425,13 @@ static ConVar *sv_stressbots{nullptr};
 
 DETOUR_DECL_MEMBER4(CBaseServer_WriteDeltaEntities, void, CBaseClient *, client, CClientFrame *, to, CClientFrame *, from, bf_write &, pBuf)
 {
-	std::lock_guard<std::recursive_mutex> lck{packentity_mux};
-
-	if(!packentity_params) {
-		DETOUR_MEMBER_CALL(CBaseServer_WriteDeltaEntities)(client, to, from, pBuf);
-		return;
-	}
-
 	if(!sv_stressbots->GetBool() &&
 		(client->IsFakeClient() ||
 		client->IsHLTV() ||
 		client->IsReplay())) {
 		writedeltaentities_client = nullptr;
 	} else {
-		writedeltaentities_client = client;
+		writedeltaentities_client = client->GetPlayerSlot();
 	}
 	DETOUR_MEMBER_CALL(CBaseServer_WriteDeltaEntities)(client, to, from, pBuf);
 	writedeltaentities_client = nullptr;
@@ -1543,7 +1533,10 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 		SendTable_CalcDelta_detour->DisableDetour();
 	}
 
-	sv_parallel_packentities->SetValue(!any_hook);
+	sv_parallel_packentities->SetValue(
+		!any_hook &&
+		g_Sample.is_parallel_pack_allowed()
+	);
 
 	in_compute_packs = true;
 	DETOUR_STATIC_CALL(SV_ComputeClientPacks)(clientCount, clients, snapshot);
@@ -1553,6 +1546,36 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 		SendTable_Encode_detour->DisableDetour();
 		SendTable_CalcDelta_detour->DisableDetour();
 	}
+}
+
+bool Sample::is_parallel_pack_allowed() const noexcept
+{
+	return std::any_of(pack_ent_listeners.cbegin(), pack_ent_listeners.cend(), 
+		[](const parallel_pack_listener *listener) noexcept -> bool {
+			return !listener->is_allowed();
+		}
+	);
+}
+
+bool Sample::add_listener(const parallel_pack_listener *ptr) noexcept
+{
+	if(std::find(pack_ent_listeners.cbegin(), pack_ent_listeners.cend(), ptr) != pack_ent_listeners.cend()) {
+		return false;
+	}
+
+	pack_ent_listeners.emplace_back(ptr);
+	return true;
+}
+
+bool Sample::remove_listener(const parallel_pack_listener *ptr) noexcept
+{
+	auto it{std::find(pack_ent_listeners.cbegin(), pack_ent_listeners.cend(), ptr)};
+	if(it == pack_ent_listeners.cend()) {
+		return false;
+	}
+
+	pack_ent_listeners.erase(it);
+	return true;
 }
 
 static void global_send_proxy(const SendProp *pProp, const void *pStructBase, const void *pData, DVariant *pOut, int iElement, int objectID)
