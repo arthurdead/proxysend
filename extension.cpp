@@ -147,9 +147,6 @@ enum prop_types : unsigned char
 
 static void global_send_proxy(const SendProp *pProp, const void *pStructBase, const void *pData, DVariant *pOut, int iElement, int objectID);
 
-using tables_t = std::unordered_map<const SendTable *, std::unique_ptr<std::size_t>>;
-static tables_t tables;
-
 static const CStandardSendProxies *std_proxies;
 
 static const SendProp *m_nPlayerCond{nullptr};
@@ -175,6 +172,14 @@ static prop_types guess_prop_type(const SendProp *pProp, const SendTable *pTable
 	printf("%s type is ", pProp->GetName());
 #endif
 
+	SendVarProxyFn pRealProxy{pProp->GetProxyFn()};
+	if(pRealProxy == global_send_proxy) {
+	#if defined _DEBUG
+		printf("invalid (global send proxy)\n");
+	#endif
+		return prop_types::unknown;
+	}
+
 	if(is_prop_cond(pProp)) {
 	#if defined _DEBUG
 		printf("unsigned int (is cond)\n");
@@ -184,13 +189,6 @@ static prop_types guess_prop_type(const SendProp *pProp, const SendTable *pTable
 
 	switch(pProp->GetType()) {
 		case DPT_Int: {
-			SendVarProxyFn pRealProxy{pProp->GetProxyFn()};
-			if(pRealProxy == global_send_proxy) {
-			#if defined _DEBUG
-				printf("invalid (global send proxy)\n");
-			#endif
-				return prop_types::unknown;
-			}
 			if(pProp->GetFlags() & SPROP_UNSIGNED) {
 				if(pRealProxy == std_proxies->m_UInt8ToInt32) {
 					if(pProp->m_nBits == 1) {
@@ -435,16 +433,30 @@ protected:
 		return (pthread_key_create(&key, dtor) == 0);
 	}
 
+	bool unallocate() noexcept
+	{
+		if(!__sync_bool_compare_and_swap(&allocated_, 1, 0)) {
+			return true;
+		}
+		return (pthread_key_delete(key) == 0);
+	}
+
 	void reset_ptr(T *ptr) noexcept
 	{
 		T *old_ptr{get_ptr_raw()};
 		if(old_ptr) {
 			delete old_ptr;
 		}
-		if(!allocated_ && !allocate()) {
-			return;
+		if(ptr) {
+			if(!allocated_ && !allocate()) {
+				return;
+			}
+			pthread_setspecific(key, ptr);
+		} else {
+			if(allocated_ && !unallocate()) {
+				return;
+			}
 		}
-		pthread_setspecific(key, ptr);
 	}
 
 private:
@@ -640,55 +652,6 @@ static void Host_Error(const char *error, ...) noexcept
 using restores_t = std::unordered_map<SendProp *, std::unique_ptr<proxyrestore_t>>;
 static restores_t restores;
 
-struct table_reference_t
-{
-	table_reference_t(SendTable *pTable) noexcept
-	{
-		tables_t::iterator it_table{tables.find(pTable)};
-		if(it_table == tables.end()) {
-		#if defined _DEBUG
-			printf("added %s\n", pTable->GetName());
-		#endif
-			it_table = tables.emplace(std::pair<const SendTable *, std::unique_ptr<std::size_t>>{pTable, new std::size_t{0}}).first;
-		}
-		table_ref = it_table->second.get();
-		++(*table_ref);
-	}
-
-	virtual ~table_reference_t() noexcept
-	{
-		if(table_ref) {
-			if(--(*table_ref) == 0) {
-				tables_t::iterator it_table{tables.begin()};
-				while(it_table != tables.end()) {
-					if(it_table->second.get() == table_ref) {
-						tables.erase(it_table);
-						break;
-					}
-					++it_table;
-				}
-			}
-		}
-	}
-
-	inline table_reference_t(table_reference_t &&other) noexcept
-	{ operator=(std::move(other)); }
-
-	table_reference_t &operator=(table_reference_t &&other) noexcept
-	{
-		table_ref = other.table_ref;
-		other.table_ref = nullptr;
-		return *this;
-	}
-
-	std::size_t *table_ref{nullptr};
-
-private:
-	table_reference_t(const table_reference_t &) = delete;
-	table_reference_t &operator=(const table_reference_t &) = delete;
-	table_reference_t() = delete;
-};
-
 struct prop_reference_t
 {
 	prop_reference_t(SendProp *pProp, prop_types type) noexcept
@@ -700,7 +663,7 @@ struct prop_reference_t
 		restore = it_restore->second.get();
 		++restore->ref;
 	#ifdef _DEBUG
-		printf("added ref %zu for %s\n", restore->ref, pProp->GetName());
+		printf("added ref %zu for %s %p\n", restore->ref, pProp->GetName(), pProp);
 	#endif
 	}
 
@@ -708,7 +671,7 @@ struct prop_reference_t
 	{
 		if(restore) {
 		#ifdef _DEBUG
-			printf("removed ref %zu for %s\n", restore->ref-1u, restore->pProp->GetName());
+			printf("removed ref %zu for %s %p\n", restore->ref-1u, restore->pProp->GetName(), restore->pProp);
 		#endif
 			if(--restore->ref == 0) {
 				restores_t::iterator it_restore{restores.begin()};
@@ -810,8 +773,8 @@ private:
 
 struct callback_t final : prop_reference_t
 {
-	callback_t(int index_, SendTable *pTable, SendProp *pProp, prop_types type_, std::size_t offset_) noexcept
-		: prop_reference_t{pProp, type_}, offset{offset_}, type{type_}, table{pTable}, prop{pProp}, index{index_}
+	callback_t(int index_, SendProp *pProp, std::string &&name_, int element_, prop_types type_, std::size_t offset_) noexcept
+		: prop_reference_t{pProp, type_}, offset{offset_}, type{type_}, element{element_}, name{std::move(name_)}, prop{pProp}, index{index_}
 	{
 		if(type == prop_types::cstring) {
 			fwd = forwards->CreateForwardEx(nullptr, ET_Hook, 6, nullptr, Param_Cell, Param_String, Param_String, Param_Cell, Param_Cell, Param_Cell);
@@ -875,11 +838,9 @@ struct callback_t final : prop_reference_t
 			}
 
 			if(!found) {
-				per_client_funcs.emplace_back(per_client_func_t{table, func});
+				per_client_funcs.emplace_back(per_client_func_t{func});
 			}
 		}
-
-		change_edict_state();
 	}
 
 	void remove_function(IPluginFunction *func) noexcept
@@ -894,8 +855,6 @@ struct callback_t final : prop_reference_t
 			}
 			++it_func;
 		}
-
-		change_edict_state();
 	}
 
 	void remove_functions_of_plugin(IPlugin *plugin) noexcept
@@ -910,15 +869,12 @@ struct callback_t final : prop_reference_t
 		}
 
 		fwd->RemoveFunctionsOfPlugin(plugin);
-
-		change_edict_state();
 	}
 
 	~callback_t() noexcept override final {
 		if(fwd) {
 			forwards->ReleaseForward(fwd);
 		}
-		change_edict_state();
 	}
 
 	static int get_current_client_slot() noexcept
@@ -940,15 +896,15 @@ struct callback_t final : prop_reference_t
 		return slot+1;
 	}
 
-	bool fwd_call_ehandle(int client, const SendProp *pProp, const void *old_pData, opaque_ptr &new_pData, int iElement, int objectID) const noexcept
+	bool fwd_call_ehandle(int client, const SendProp *pProp, const void *old_pData, opaque_ptr &new_pData, int objectID) const noexcept
 	{
 		fwd->PushCell(objectID);
-		fwd->PushString(pProp->GetName());
+		fwd->PushString(name.c_str());
 		const CBaseHandle &hndl{*reinterpret_cast<const CBaseHandle *>(old_pData)};
 		edict_t *edict{gamehelpers->GetHandleEntity(const_cast<CBaseHandle &>(hndl))};
 		cell_t sp_value{static_cast<cell_t>(edict ? gamehelpers->IndexOfEdict(edict) : -1)};
 		fwd->PushCellByRef(&sp_value);
-		fwd->PushCell(iElement);
+		fwd->PushCell(element);
 		fwd->PushCell(client);
 		cell_t res{Pl_Continue};
 		fwd->Execute(&res);
@@ -964,10 +920,10 @@ struct callback_t final : prop_reference_t
 		return false;
 	}
 
-	bool fwd_call_color32(int client, const SendProp *pProp, const void *old_pData, opaque_ptr &new_pData, int iElement, int objectID) const noexcept
+	bool fwd_call_color32(int client, const SendProp *pProp, const void *old_pData, opaque_ptr &new_pData, int objectID) const noexcept
 	{
 		fwd->PushCell(objectID);
-		fwd->PushString(pProp->GetName());
+		fwd->PushString(name.c_str());
 		const color32 &clr{*reinterpret_cast<const color32 *>(old_pData)};
 		cell_t sp_r{static_cast<cell_t>(clr.r)};
 		cell_t sp_g{static_cast<cell_t>(clr.g)};
@@ -977,7 +933,7 @@ struct callback_t final : prop_reference_t
 		fwd->PushCellByRef(&sp_g);
 		fwd->PushCellByRef(&sp_b);
 		fwd->PushCellByRef(&sp_a);
-		fwd->PushCell(iElement);
+		fwd->PushCell(element);
 		fwd->PushCell(client);
 		cell_t res{Pl_Continue};
 		fwd->Execute(&res);
@@ -994,13 +950,13 @@ struct callback_t final : prop_reference_t
 	}
 
 	template <typename T>
-	bool fwd_call_int(int client, const SendProp *pProp, const void *old_pData, opaque_ptr &new_pData, int iElement, int objectID) const noexcept
+	bool fwd_call_int(int client, const SendProp *pProp, const void *old_pData, opaque_ptr &new_pData, int objectID) const noexcept
 	{
 		fwd->PushCell(objectID);
-		fwd->PushString(pProp->GetName());
+		fwd->PushString(name.c_str());
 		cell_t sp_value{static_cast<cell_t>(*reinterpret_cast<const T *>(old_pData))};
 		fwd->PushCellByRef(&sp_value);
-		fwd->PushCell(iElement);
+		fwd->PushCell(element);
 		fwd->PushCell(client);
 		cell_t res{Pl_Continue};
 		fwd->Execute(&res);
@@ -1013,13 +969,13 @@ struct callback_t final : prop_reference_t
 		return false;
 	}
 
-	bool fwd_call_float(int client, const SendProp *pProp, const void *old_pData, opaque_ptr &new_pData, int iElement, int objectID) const noexcept
+	bool fwd_call_float(int client, const SendProp *pProp, const void *old_pData, opaque_ptr &new_pData, int objectID) const noexcept
 	{
 		fwd->PushCell(objectID);
-		fwd->PushString(pProp->GetName());
+		fwd->PushString(name.c_str());
 		float sp_value{static_cast<float>(*reinterpret_cast<const float *>(old_pData))};
 		fwd->PushFloatByRef(&sp_value);
-		fwd->PushCell(iElement);
+		fwd->PushCell(element);
 		fwd->PushCell(client);
 		cell_t res{Pl_Continue};
 		fwd->Execute(&res);
@@ -1033,10 +989,10 @@ struct callback_t final : prop_reference_t
 	}
 
 	template <typename T>
-	bool fwd_call_vec(int client, const SendProp *pProp, const void *old_pData, opaque_ptr &new_pData, int iElement, int objectID) const noexcept
+	bool fwd_call_vec(int client, const SendProp *pProp, const void *old_pData, opaque_ptr &new_pData, int objectID) const noexcept
 	{
 		fwd->PushCell(objectID);
-		fwd->PushString(pProp->GetName());
+		fwd->PushString(name.c_str());
 		const T &vec{*reinterpret_cast<const T *>(old_pData)};
 		cell_t sp_value[3]{
 			sp_ftoc(vec[0]),
@@ -1044,7 +1000,7 @@ struct callback_t final : prop_reference_t
 			sp_ftoc(vec[2])
 		};
 		fwd->PushArray(sp_value, 3, SM_PARAM_COPYBACK);
-		fwd->PushCell(iElement);
+		fwd->PushCell(element);
 		fwd->PushCell(client);
 		cell_t res{Pl_Continue};
 		fwd->Execute(&res);
@@ -1059,15 +1015,15 @@ struct callback_t final : prop_reference_t
 		return false;
 	}
 
-	bool fwd_call_str(int client, const SendProp *pProp, const void *old_pData, opaque_ptr &new_pData, int iElement, int objectID) const noexcept
+	bool fwd_call_str(int client, const SendProp *pProp, const void *old_pData, opaque_ptr &new_pData, int objectID) const noexcept
 	{
 		fwd->PushCell(objectID);
-		fwd->PushString(pProp->GetName());
+		fwd->PushString(name.c_str());
 		static char sp_value[4096];
 		strcpy(sp_value, reinterpret_cast<const char *>(old_pData));
 		fwd->PushStringEx(sp_value, sizeof(sp_value), SM_PARAM_STRING_UTF8|SM_PARAM_STRING_COPY, SM_PARAM_COPYBACK);
 		fwd->PushCell(sizeof(sp_value));
-		fwd->PushCell(iElement);
+		fwd->PushCell(element);
 		fwd->PushCell(client);
 		cell_t res{Pl_Continue};
 		fwd->Execute(&res);
@@ -1088,35 +1044,35 @@ struct callback_t final : prop_reference_t
 		return true;
 	}
 
-	bool fwd_call(int client, const SendProp *pProp, const void *old_pData, opaque_ptr &new_pData, int iElement, int objectID) const noexcept
+	bool fwd_call(int client, const SendProp *pProp, const void *old_pData, opaque_ptr &new_pData, int objectID) const noexcept
 	{
 		switch(type) {
 			case prop_types::int_:
-			return fwd_call_int<int>(client, pProp, old_pData, new_pData, iElement, objectID);
+			return fwd_call_int<int>(client, pProp, old_pData, new_pData, objectID);
 			case prop_types::bool_:
-			return fwd_call_int<bool>(client, pProp, old_pData, new_pData, iElement, objectID);
+			return fwd_call_int<bool>(client, pProp, old_pData, new_pData, objectID);
 			case prop_types::short_:
-			return fwd_call_int<short>(client, pProp, old_pData, new_pData, iElement, objectID);
+			return fwd_call_int<short>(client, pProp, old_pData, new_pData, objectID);
 			case prop_types::char_:
-			return fwd_call_int<char>(client, pProp, old_pData, new_pData, iElement, objectID);
+			return fwd_call_int<char>(client, pProp, old_pData, new_pData, objectID);
 			case prop_types::unsigned_int:
-			return fwd_call_int<unsigned int>(client, pProp, old_pData, new_pData, iElement, objectID);
+			return fwd_call_int<unsigned int>(client, pProp, old_pData, new_pData, objectID);
 			case prop_types::unsigned_short:
-			return fwd_call_int<unsigned short>(client, pProp, old_pData, new_pData, iElement, objectID);
+			return fwd_call_int<unsigned short>(client, pProp, old_pData, new_pData, objectID);
 			case prop_types::unsigned_char:
-			return fwd_call_int<unsigned char>(client, pProp, old_pData, new_pData, iElement, objectID);
+			return fwd_call_int<unsigned char>(client, pProp, old_pData, new_pData, objectID);
 			case prop_types::float_:
-			return fwd_call_float(client, pProp, old_pData, new_pData, iElement, objectID);
+			return fwd_call_float(client, pProp, old_pData, new_pData, objectID);
 			case prop_types::vector:
-			return fwd_call_vec<Vector>(client, pProp, old_pData, new_pData, iElement, objectID);
+			return fwd_call_vec<Vector>(client, pProp, old_pData, new_pData, objectID);
 			case prop_types::qangle:
-			return fwd_call_vec<QAngle>(client, pProp, old_pData, new_pData, iElement, objectID);
+			return fwd_call_vec<QAngle>(client, pProp, old_pData, new_pData, objectID);
 			case prop_types::color32_:
-			return fwd_call_color32(client, pProp, old_pData, new_pData, iElement, objectID);
+			return fwd_call_color32(client, pProp, old_pData, new_pData, objectID);
 			case prop_types::ehandle:
-			return fwd_call_ehandle(client, pProp, old_pData, new_pData, iElement, objectID);
+			return fwd_call_ehandle(client, pProp, old_pData, new_pData, objectID);
 			case prop_types::cstring:
-			return fwd_call_str(client, pProp, old_pData, new_pData, iElement, objectID);
+			return fwd_call_str(client, pProp, old_pData, new_pData, objectID);
 		}
 		return false;
 	}
@@ -1142,12 +1098,13 @@ struct callback_t final : prop_reference_t
 		other.fwd = nullptr;
 		prop = other.prop;
 		other.prop = nullptr;
-		table = other.table;
-		other.table = nullptr;
 		offset = other.offset;
 		type = other.type;
 		index = other.index;
 		other.index = -1;
+		name = std::move(other.name);
+		element = other.element;
+		other.element = 0;
 		per_client_funcs = std::move(other.per_client_funcs);
 		return *this;
 	}
@@ -1155,22 +1112,21 @@ struct callback_t final : prop_reference_t
 	IChangeableForward *fwd{nullptr};
 	std::size_t offset{-1};
 	prop_types type{prop_types::unknown};
-	std::size_t elements{1};
-	SendTable *table{nullptr};
+	int element{0};
+	std::string name{};
 	SendProp *prop{nullptr};
 	int index{-1};
 
-	struct per_client_func_t : table_reference_t
+	struct per_client_func_t
 	{
 		IPluginFunction *func{nullptr};
 
-		inline per_client_func_t(SendTable *pTable, IPluginFunction *func_) noexcept
-			: table_reference_t{pTable}, func{func_}
+		inline per_client_func_t(IPluginFunction *func_) noexcept
+			: func{func_}
 		{
 		}
 
 		inline per_client_func_t(per_client_func_t &&other) noexcept
-			: table_reference_t{std::move(other)}
 		{ operator=(std::move(other)); }
 
 		per_client_func_t &operator=(per_client_func_t &&other) noexcept
@@ -1197,13 +1153,13 @@ private:
 
 using callbacks_t = std::unordered_map<const SendProp *, callback_t>;
 
-struct proxyhook_t final : table_reference_t
+struct proxyhook_t final
 {
 	callbacks_t callbacks;
 	int index{-1};
 
-	inline proxyhook_t(int index_, SendTable *pTable) noexcept
-		: table_reference_t{pTable}, index{index_}
+	inline proxyhook_t(int index_) noexcept
+		: index{index_}
 	{
 	}
 
@@ -1211,18 +1167,17 @@ struct proxyhook_t final : table_reference_t
 	{
 	}
 
-	void add_callback(SendTable *pTable, SendProp *pProp, prop_types type, int offset, IPluginFunction *func, bool per_client) noexcept
+	void add_callback(SendProp *pProp, std::string &&name, int element, prop_types type, int offset, IPluginFunction *func, bool per_client) noexcept
 	{
 		callbacks_t::iterator it_callback{callbacks.find(pProp)};
 		if(it_callback == callbacks.end()) {
-			it_callback = callbacks.emplace(std::pair<const SendProp *, callback_t>{pProp, callback_t{index, pTable, pProp, type, offset}}).first;
+			it_callback = callbacks.emplace(std::pair<const SendProp *, callback_t>{pProp, callback_t{index, pProp, std::move(name), element, type, offset}}).first;
 		}
 
 		it_callback->second.add_function(func, per_client);
 	}
 
 	inline proxyhook_t(proxyhook_t &&other) noexcept
-		: table_reference_t{std::move(other)}
 	{ operator=(std::move(other)); }
 
 	proxyhook_t &operator=(proxyhook_t &&other) noexcept
@@ -1244,14 +1199,6 @@ static hooks_t hooks;
 
 DETOUR_DECL_STATIC6(SendTable_Encode, bool, const SendTable *, pTable, const void *, pStruct, bf_write *, pOut, int, objectID, CUtlMemory<CSendProxyRecipients> *, pRecipients, bool, bNonZeroOnly)
 {
-#if 0
-	const tables_t &ctables{tables};
-
-	if(ctables.find(pTable) == ctables.cend()) {
-		packentity_params.reset(nullptr);
-	}
-#endif
-
 	if(!packentity_params || !in_compute_packs) {
 		return DETOUR_STATIC_CALL(SendTable_Encode)(pTable, pStruct, pOut, objectID, pRecipients, bNonZeroOnly);
 	}
@@ -1291,51 +1238,53 @@ DETOUR_DECL_STATIC6(SendTable_Encode, bool, const SendTable *, pTable, const voi
 
 DETOUR_DECL_STATIC8(SendTable_CalcDelta, int, const SendTable *, pTable, const void *, pFromState, const int, nFromBits, const void *, pToState, const int, nToBits, int *, pDeltaProps, int, nMaxDeltaProps, const int, objectID)
 {
-	if(!packentity_params || !in_compute_packs) {
+	if(!packentity_params || !in_compute_packs || !do_calc_delta) {
 		return DETOUR_STATIC_CALL(SendTable_CalcDelta)(pTable, pFromState, nFromBits, pToState, nToBits, pDeltaProps, nMaxDeltaProps, objectID);
 	}
 
 	int global_nChanges{DETOUR_STATIC_CALL(SendTable_CalcDelta)(pTable, pFromState, nFromBits, pToState, nToBits, pDeltaProps, nMaxDeltaProps, objectID)};
 
-	if(do_calc_delta) {
-		if(global_nChanges < nMaxDeltaProps) {
-			std::unique_ptr<int[]> client_deltaProps{new int[nMaxDeltaProps]{static_cast<unsigned int>(-1)}};
+	if(global_nChanges < nMaxDeltaProps) {
+		int *client_deltaProps{new int[nMaxDeltaProps]{static_cast<unsigned int>(-1)}};
 
-			for(int i{0}; i < packentity_params->slots.size(); ++i) {
-				packed_entity_data_t &packedData{packentity_params->entity_data[i].back()};
+		for(int i{0}; i < packentity_params->slots.size(); ++i) {
+			packed_entity_data_t &packedData{packentity_params->entity_data[i].back()};
 
-				const int client_nChanges{DETOUR_STATIC_CALL(SendTable_CalcDelta)(pTable, pFromState, nFromBits, packedData.packedData.get(), packedData.writeBuf->GetNumBitsWritten(), client_deltaProps.get(), nMaxDeltaProps, objectID)};
+			const int client_nChanges{DETOUR_STATIC_CALL(SendTable_CalcDelta)(pTable, pFromState, nFromBits, packedData.packedData.get(), packedData.writeBuf->GetNumBitsWritten(), client_deltaProps, nMaxDeltaProps, objectID)};
 
-				bool done{false};
+			bool done{false};
 
-				for(int j{0}; j < client_nChanges; ++j) {
-					bool found{false};
-					for(int k{0}; k < global_nChanges; ++k) {
-						if(pDeltaProps[k] == client_deltaProps[j]) {
-							found = true;
-							break;
-						}
-					}
-					if(!found) {
-						pDeltaProps[global_nChanges++] = client_deltaProps[j];
-						if(global_nChanges >= nMaxDeltaProps) {
-							done = true;
-							break;
-						}
+			for(int j{0}; j < client_nChanges; ++j) {
+				bool found{false};
+				for(int k{0}; k < global_nChanges; ++k) {
+					if(pDeltaProps[k] == client_deltaProps[j]) {
+						found = true;
+						break;
 					}
 				}
-
-				if(done) {
-					break;
+				if(!found) {
+					pDeltaProps[global_nChanges++] = client_deltaProps[j];
+					if(global_nChanges >= nMaxDeltaProps) {
+						done = true;
+						break;
+					}
 				}
 			}
+
+			if(done) {
+				break;
+			}
 		}
-		do_calc_delta = nullptr;
+
+		delete[] client_deltaProps;
 	}
+
+	do_calc_delta = nullptr;
 
 	if(global_nChanges > nMaxDeltaProps) {
 		global_nChanges = nMaxDeltaProps;
 	}
+
 	return global_nChanges;
 }
 
@@ -1488,7 +1437,7 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 
 	const hooks_t &chooks{hooks};
 
-	if(!slots.empty()) {
+	if(slots.size() > 0) {
 		entities.reserve(snapshot->m_nValidEntities);
 	}
 
@@ -1497,11 +1446,11 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 		if(it_hook != chooks.cend()) {
 			if(!it_hook->second.callbacks.empty()) {
 				any_hook = true;
-				if(slots.empty()) {
+				if(slots.size() == 0) {
 					break;
 				}
 			}
-			if(!slots.empty()) {
+			if(slots.size() > 0) {
 				bool any_per_client_func{false};
 				for(const auto &it_callback : it_hook->second.callbacks) {
 					if(it_callback.second.has_any_per_client_func()) {
@@ -1518,7 +1467,7 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 
 	sv_parallel_sendsnapshot->SetValue(true);
 
-	const bool any_per_client_hook{!slots.empty() && !entities.empty()};
+	const bool any_per_client_hook{slots.size() > 0 && entities.size() > 0};
 
 	if(any_per_client_hook) {
 		packentity_params.reset(new pack_entity_params_t{std::move(slots), std::move(entities), snapshot->m_ListIndex});
@@ -1538,6 +1487,11 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 		g_Sample.is_parallel_pack_allowed()
 	);
 
+#if defined _DEBUG && 0
+	printf("slots = %i, entities = %i\n", slots.size(), entities.size());
+	printf("any_hook = %i, any_per_client_hook = %i, is_parallel_pack_allowed = %i\n", any_hook, any_per_client_hook, g_Sample.is_parallel_pack_allowed());
+#endif
+
 	in_compute_packs = true;
 	DETOUR_STATIC_CALL(SV_ComputeClientPacks)(clientCount, clients, snapshot);
 	in_compute_packs = false;
@@ -1550,7 +1504,7 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 
 bool Sample::is_parallel_pack_allowed() const noexcept
 {
-	return std::any_of(pack_ent_listeners.cbegin(), pack_ent_listeners.cend(), 
+	return !std::any_of(pack_ent_listeners.cbegin(), pack_ent_listeners.cend(), 
 		[](const parallel_pack_listener *listener) noexcept -> bool {
 			return !listener->is_allowed();
 		}
@@ -1592,7 +1546,7 @@ static void global_send_proxy(const SendProp *pProp, const void *pStructBase, co
 			if(it_callback->second.can_call_fwd(client)) {
 				if(std::this_thread::get_id() == main_thread_id) {
 					opaque_ptr new_data{};
-					if(it_callback->second.fwd_call(client, pProp, pData, new_data, iElement, objectID)) {
+					if(it_callback->second.fwd_call(client, pProp, pData, new_data, objectID)) {
 						it_callback->second.proxy_call(pProp, pStructBase, pData, new_data.get(), pOut, iElement, objectID);
 						return;
 					}
@@ -1699,17 +1653,18 @@ static bool UTIL_FindInSendTable(SendTable *pTable,
 
 static std::unordered_map<std::string, std::unordered_map<std::string, sm_sendprop_info_ex_t>> propinfos;
 
-static bool FindSendPropInfo(ServerClass *pClass, const std::string &name, sm_sendprop_info_ex_t *info) noexcept
+static bool FindSendPropInfo(ServerClass *pClass, std::string &&name, sm_sendprop_info_ex_t *info) noexcept
 {
-	auto it_props{propinfos.find(std::string{pClass->GetName()})};
+	std::string sv_name{pClass->GetName()};
+	auto it_props{propinfos.find(sv_name)};
 	if(it_props == propinfos.cend()) {
-		it_props = propinfos.emplace(std::pair<std::string, std::unordered_map<std::string, sm_sendprop_info_ex_t>>{name, {}}).first;
+		it_props = propinfos.emplace(std::pair<std::string, std::unordered_map<std::string, sm_sendprop_info_ex_t>>{std::move(sv_name), {}}).first;
 	}
 	if(it_props != propinfos.cend()) {
 		auto it_prop{it_props->second.find(name)};
 		if(it_prop == it_props->second.cend()) {
 			if(UTIL_FindInSendTable(pClass->m_pTable, name.c_str(), info, 0)) {
-				it_prop = it_props->second.emplace(std::pair<std::string, sm_sendprop_info_ex_t>{name, std::move(*info)}).first;
+				it_prop = it_props->second.emplace(std::pair<std::string, sm_sendprop_info_ex_t>{std::move(name), std::move(*info)}).first;
 			}
 		}
 		if(it_prop != it_props->second.cend()) {
@@ -1720,29 +1675,8 @@ static bool FindSendPropInfo(ServerClass *pClass, const std::string &name, sm_se
 	return false;
 }
 
-static cell_t proxysend_hook(IPluginContext *pContext, const cell_t *params) noexcept
+static cell_t proxysend_handle_hook(IPluginContext *pContext, hooks_t::iterator it_hook, int idx, int offset, SendProp *pProp, std::string &&prop_name, int element, SendTable *pTable, IPluginFunction *callback, bool per_client)
 {
-	int idx{gamehelpers->ReferenceToBCompatRef(params[1])};
-	CBaseEntity *pEntity{gamehelpers->ReferenceToEntity(params[1])};
-	if(!pEntity) {
-		return pContext->ThrowNativeError("Invalid Entity Reference/Index %i", idx);
-	}
-
-	char *name_ptr;
-	pContext->LocalToString(params[2], &name_ptr);
-	const std::string name{name_ptr};
-
-	IServerNetworkable *pNetwork{pEntity->GetNetworkable()};
-	ServerClass *pServer{pNetwork->GetServerClass()};
-	SendTable *pClassTable{pServer->m_pTable};
-
-	sm_sendprop_info_ex_t info{};
-	if(!FindSendPropInfo(pServer, name, &info)) {
-		return pContext->ThrowNativeError("Could not find prop %s", name.c_str());
-	}
-	SendTable *pTable{info.table};
-
-	SendProp *pProp{info.prop};
 	prop_types type{prop_types::unknown};
 	restores_t::const_iterator it_restore{restores.find(pProp)};
 	if(it_restore != restores.cend()) {
@@ -1755,19 +1689,79 @@ static cell_t proxysend_hook(IPluginContext *pContext, const cell_t *params) noe
 	}
 
 #ifdef _DEBUG
-	printf("added %s hook for %i\n", pProp->GetName(), idx);
+	printf("added %s %p hook for %i\n", pProp->GetName(), pProp, idx);
 #endif
+
+	it_hook->second.add_callback(pProp, std::move(prop_name), element, type, offset, callback, per_client);
+
+	return 0;
+}
+
+static cell_t proxysend_hook(IPluginContext *pContext, const cell_t *params) noexcept
+{
+	int idx{gamehelpers->ReferenceToBCompatRef(params[1])};
+	CBaseEntity *pEntity{gamehelpers->ReferenceToEntity(params[1])};
+	if(!pEntity) {
+		return pContext->ThrowNativeError("Invalid Entity Reference/Index %i", idx);
+	}
+
+	char *name_ptr;
+	pContext->LocalToString(params[2], &name_ptr);
+	std::string name{name_ptr};
 
 	IPluginFunction *callback{pContext->GetFunctionById(params[3])};
 
+	bool per_client = static_cast<bool>(params[4]);
+
+	IServerNetworkable *pNetwork{pEntity->GetNetworkable()};
+	ServerClass *pServer{pNetwork->GetServerClass()};
+
+	sm_sendprop_info_ex_t info{};
+	if(!FindSendPropInfo(pServer, std::move(name), &info)) {
+		return pContext->ThrowNativeError("Could not find prop %s", name.c_str());
+	}
+	SendTable *pTable{info.table};
+
+	SendProp *pProp{info.prop};
+	std::string prop_name{pProp->GetName()};
+
 	hooks_t::iterator it_hook{hooks.find(idx)};
 	if(it_hook == hooks.end()) {
-		it_hook = hooks.emplace(std::pair<int, proxyhook_t>{idx, proxyhook_t{idx, pClassTable}}).first;
+		it_hook = hooks.emplace(std::pair<int, proxyhook_t>{idx, proxyhook_t{idx}}).first;
 	}
 
-	it_hook->second.add_callback(pTable, pProp, type, info.actual_offset, callback, static_cast<bool>(params[4]));
+	if(pProp->GetType() == DPT_DataTable) {
+		SendTable *pPropTable{pProp->GetDataTable()};
+		int NumProps{pPropTable->GetNumProps()};
+		for(int i = 0; i < NumProps; ++i) {
+			SendProp *pChildProp{pPropTable->GetProp(i)};
+			std::string tmp_name{prop_name};
+			cell_t ret{proxysend_handle_hook(pContext, it_hook, idx, info.actual_offset + pChildProp->GetOffset(), pChildProp, std::move(tmp_name), i, pTable, callback, per_client)};
+			if(ret != 0) {
+				return ret;
+			}
+		}
+		return 0;
+	}
 
-	return 0;
+	return proxysend_handle_hook(pContext, it_hook, idx, info.actual_offset, pProp, std::move(prop_name), 0, pTable, callback, per_client);
+}
+
+static void proxysend_handle_unhook(hooks_t::iterator it_hook, int idx, const SendProp *pProp, const char *name, IPluginFunction *callback)
+{
+	callbacks_t::iterator it_callback{it_hook->second.callbacks.find(pProp)};
+	if(it_callback != it_hook->second.callbacks.end()) {
+		it_callback->second.remove_function(callback);
+	#ifdef _DEBUG
+		printf("removed func from %s %p callback for %i\n", name, pProp, idx);
+	#endif
+		if(it_callback->second.fwd->GetFunctionCount() == 0) {
+		#ifdef _DEBUG
+			printf("removed callback %s %p for %i\n", name, pProp, idx);
+		#endif
+			it_hook->second.callbacks.erase(it_callback);
+		}
+	}
 }
 
 static cell_t proxysend_unhook(IPluginContext *pContext, const cell_t *params) noexcept
@@ -1795,15 +1789,15 @@ static cell_t proxysend_unhook(IPluginContext *pContext, const cell_t *params) n
 
 	hooks_t::iterator it_hook{hooks.find(idx)};
 	if(it_hook != hooks.end()) {
-		callbacks_t::iterator it_callback{it_hook->second.callbacks.find(pProp)};
-		if(it_callback != it_hook->second.callbacks.end()) {
-			it_callback->second.remove_function(callback);
-		#ifdef _DEBUG
-			printf("removed %s hook for %i\n", name_ptr, idx);
-		#endif
-			if(it_callback->second.fwd->GetFunctionCount() == 0) {
-				it_hook->second.callbacks.erase(it_callback);
+		if(pProp->GetType() == DPT_DataTable) {
+			SendTable *pPropTable{pProp->GetDataTable()};
+			int NumProps{pPropTable->GetNumProps()};
+			for(int i = 0; i < NumProps; ++i) {
+				SendProp *pChildProp{pPropTable->GetProp(i)};
+				proxysend_handle_unhook(it_hook, idx, pChildProp, name_ptr, callback);
 			}
+		} else {
+			proxysend_handle_unhook(it_hook, idx, pProp, name_ptr, callback);
 		}
 		if(it_hook->second.callbacks.empty()) {
 			hooks.erase(it_hook);
@@ -1866,6 +1860,7 @@ bool Sample::SDK_OnLoad(char *error, size_t maxlen, bool late) noexcept
 
 	sharesys->AddDependency(myself, "sdkhooks.ext", true, true);
 
+	sharesys->AddInterface(myself, this);
 	sharesys->RegisterLibrary(myself, "proxysend");
 
 	smutils->AddGameFrameHook(game_frame);
@@ -1899,6 +1894,7 @@ bool Sample::RegisterConCommandBase(ConCommandBase *pCommand)
 bool Sample::SDK_OnMetamodLoad(ISmmAPI *ismm, char *error, size_t maxlen, bool late) noexcept
 {
 	GET_V_IFACE_ANY(GetEngineFactory, g_pCVar, ICvar, CVAR_INTERFACE_VERSION);
+	ConVar_Register(0, this);
 
 	std_proxies = gamedll->GetStandardSendProxies();
 
@@ -1914,7 +1910,6 @@ bool Sample::SDK_OnMetamodLoad(ISmmAPI *ismm, char *error, size_t maxlen, bool l
 void Sample::OnCoreMapEnd() noexcept
 {
 	hooks.clear();
-	tables.clear();
 	restores.clear();
 }
 
