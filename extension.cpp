@@ -586,19 +586,43 @@ private:
 
 struct packed_entity_data_t final
 {
-	packed_entity_data_t(packed_entity_data_t &&) noexcept = default;
-	packed_entity_data_t &operator=(packed_entity_data_t &&) noexcept = default;
+	packed_entity_data_t(packed_entity_data_t &&other) noexcept
+	{ operator=(std::move(other)); }
+	packed_entity_data_t &operator=(packed_entity_data_t &&other) noexcept {
+		packedData = other.packedData;
+		other.packedData = nullptr;
+		writeBuf = other.writeBuf;
+		other.writeBuf = nullptr;
+		objectID = other.objectID;
+		other.objectID = -1;
+		return *this;
+	}
 
-	std::unique_ptr<char[]> packedData{};
-	std::unique_ptr<bf_write> writeBuf{};
+	char *packedData{nullptr};
+	bf_write *writeBuf{nullptr};
 	int objectID{-1};
 
 	packed_entity_data_t() noexcept = default;
-	~packed_entity_data_t() noexcept = default;
+	~packed_entity_data_t() noexcept {
+		reset();
+	}
+
+	void reset() noexcept {
+		if(packedData) {
+			free(packedData);
+			packedData = nullptr;
+		}
+		if(writeBuf) {
+			delete writeBuf;
+			writeBuf = nullptr;
+		}
+	}
 
 	void allocate() noexcept {
-		packedData.reset(static_cast<char *>(aligned_alloc(4, MAX_PACKEDENTITY_DATA)));
-		writeBuf.reset(new bf_write{"SV_PackEntity->writeBuf", packedData.get(), MAX_PACKEDENTITY_DATA});
+		reset();
+
+		packedData = static_cast<char *>(aligned_alloc(4, MAX_PACKEDENTITY_DATA));
+		writeBuf = new bf_write{"SV_PackEntity->writeBuf", packedData, MAX_PACKEDENTITY_DATA};
 	}
 
 private:
@@ -1221,7 +1245,7 @@ DETOUR_DECL_STATIC6(SendTable_Encode, bool, const SendTable *, pTable, const voi
 			packedData.allocate();
 
 			sendproxy_client_slot = packentity_params->slots[i];
-			const bool encoded{DETOUR_STATIC_CALL(SendTable_Encode)(pTable, pStruct, packedData.writeBuf.get(), objectID, pRecipients, bNonZeroOnly)};
+			const bool encoded{DETOUR_STATIC_CALL(SendTable_Encode)(pTable, pStruct, packedData.writeBuf, objectID, pRecipients, bNonZeroOnly)};
 			sendproxy_client_slot = nullptr;
 			if(!encoded) {
 				Host_Error( "SV_PackEntity: SendTable_Encode returned false (ent %d).\n", objectID );
@@ -1248,9 +1272,14 @@ DETOUR_DECL_STATIC8(SendTable_CalcDelta, int, const SendTable *, pTable, const v
 		int *client_deltaProps{new int[nMaxDeltaProps]{static_cast<unsigned int>(-1)}};
 
 		for(int i{0}; i < packentity_params->slots.size(); ++i) {
-			packed_entity_data_t &packedData{packentity_params->entity_data[i].back()};
+			std::vector<packed_entity_data_t> &entity_data{packentity_params->entity_data[i]};
+			if(entity_data.size() == 0) {
+				continue;
+			}
 
-			const int client_nChanges{DETOUR_STATIC_CALL(SendTable_CalcDelta)(pTable, pFromState, nFromBits, packedData.packedData.get(), packedData.writeBuf->GetNumBitsWritten(), client_deltaProps, nMaxDeltaProps, objectID)};
+			packed_entity_data_t &packedData{entity_data.back()};
+
+			const int client_nChanges{DETOUR_STATIC_CALL(SendTable_CalcDelta)(pTable, pFromState, nFromBits, packedData.packedData, packedData.writeBuf->GetNumBitsWritten(), client_deltaProps, nMaxDeltaProps, objectID)};
 
 			bool done{false};
 
@@ -1349,7 +1378,8 @@ DETOUR_DECL_MEMBER2(CFrameSnapshotManager_GetPackedEntity, PackedEntity *, CFram
 	const packed_entity_data_t *packedData{nullptr};
 	for(int i{0}; i < packentity_params->slots.size(); ++i) {
 		if(packentity_params->slots[i] == slot) {
-			for(const packed_entity_data_t &it : packentity_params->entity_data[i]) {
+			const std::vector<packed_entity_data_t> &entity_data{packentity_params->entity_data[i]};
+			for(const packed_entity_data_t &it : entity_data) {
 				if(it.objectID == entity) {
 					packedData = &it;
 					break;
@@ -1364,7 +1394,7 @@ DETOUR_DECL_MEMBER2(CFrameSnapshotManager_GetPackedEntity, PackedEntity *, CFram
 			packed->FreeData();
 		}
 
-		packed->AllocAndCopyPadded(packedData->packedData.get(), packedData->writeBuf->GetNumBytesWritten());
+		packed->AllocAndCopyPadded(packedData->packedData, packedData->writeBuf->GetNumBytesWritten());
 	}
 
 	return packed;
@@ -1372,12 +1402,28 @@ DETOUR_DECL_MEMBER2(CFrameSnapshotManager_GetPackedEntity, PackedEntity *, CFram
 
 static ConVar *sv_stressbots{nullptr};
 
+static bool is_client_valid(CBaseClient *client) noexcept
+{
+	if(!sv_stressbots->GetBool()) {
+		if(client->IsFakeClient() ||
+			client->IsHLTV() ||
+			client->IsReplay()) {
+			return false;
+		}
+	}
+
+	if(!client->IsConnected() ||
+		!client->IsSpawned() ||
+		!client->IsActive()) {
+		return false;
+	}
+
+	return true;
+}
+
 DETOUR_DECL_MEMBER4(CBaseServer_WriteDeltaEntities, void, CBaseClient *, client, CClientFrame *, to, CClientFrame *, from, bf_write &, pBuf)
 {
-	if(!sv_stressbots->GetBool() &&
-		(client->IsFakeClient() ||
-		client->IsHLTV() ||
-		client->IsReplay())) {
+	if(!is_client_valid(client)) {
 		writedeltaentities_client = nullptr;
 	} else {
 		writedeltaentities_client = client->GetPlayerSlot();
@@ -1422,10 +1468,7 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 	slots.reserve(clientCount);
 	for(int i{0}; i < clientCount; ++i) {
 		CGameClient *client{clients[i]};
-		if(!sv_stressbots->GetBool() &&
-			(client->IsFakeClient() ||
-			client->IsHLTV() ||
-			client->IsReplay())) {
+		if(!is_client_valid(client)) {
 			continue;
 		}
 		slots.emplace_back(client->GetPlayerSlot());
@@ -1469,6 +1512,11 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 
 	const bool any_per_client_hook{slots.size() > 0 && entities.size() > 0};
 
+#if defined _DEBUG && 1
+	printf("slots = %i, entities = %i\n", slots.size(), entities.size());
+	printf("any_hook = %i, any_per_client_hook = %i, is_parallel_pack_allowed = %i\n", any_hook, any_per_client_hook, g_Sample.is_parallel_pack_allowed());
+#endif
+
 	if(any_per_client_hook) {
 		packentity_params.reset(new pack_entity_params_t{std::move(slots), std::move(entities), snapshot->m_ListIndex});
 		SendTable_Encode_detour->EnableDetour();
@@ -1486,11 +1534,6 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 		!any_hook &&
 		g_Sample.is_parallel_pack_allowed()
 	);
-
-#if defined _DEBUG && 0
-	printf("slots = %i, entities = %i\n", slots.size(), entities.size());
-	printf("any_hook = %i, any_per_client_hook = %i, is_parallel_pack_allowed = %i\n", any_hook, any_per_client_hook, g_Sample.is_parallel_pack_allowed());
-#endif
 
 	in_compute_packs = true;
 	DETOUR_STATIC_CALL(SV_ComputeClientPacks)(clientCount, clients, snapshot);
