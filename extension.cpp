@@ -142,7 +142,8 @@ enum prop_types : unsigned char
 	ehandle,
 	bool_,
 	color32_,
-	unknown,
+	tstring,
+	unknown
 };
 
 static void global_send_proxy(const SendProp *pProp, const void *pStructBase, const void *pData, DVariant *pOut, int iElement, int objectID);
@@ -309,8 +310,9 @@ static prop_types guess_prop_type(const SendProp *pProp, const SendTable *pTable
 		}
 		case DPT_VectorXY:
 		return prop_types::vector;
-		case DPT_String:
-		return prop_types::cstring;
+		case DPT_String: {
+			return prop_types::cstring;
+		}
 		case DPT_Array:
 		return prop_types::unknown;
 		case DPT_DataTable:
@@ -800,7 +802,7 @@ struct callback_t final : prop_reference_t
 	callback_t(int index_, SendProp *pProp, std::string &&name_, int element_, prop_types type_, std::size_t offset_) noexcept
 		: prop_reference_t{pProp, type_}, offset{offset_}, type{type_}, element{element_}, name{std::move(name_)}, prop{pProp}, index{index_}
 	{
-		if(type == prop_types::cstring) {
+		if(type == prop_types::cstring || type == prop_types::tstring) {
 			fwd = forwards->CreateForwardEx(nullptr, ET_Hook, 6, nullptr, Param_Cell, Param_String, Param_String, Param_Cell, Param_Cell, Param_Cell);
 		} else if(type == prop_types::color32_) {
 			fwd = forwards->CreateForwardEx(nullptr, ET_Hook, 8, nullptr, Param_Cell, Param_String, Param_CellByRef, Param_CellByRef, Param_CellByRef, Param_CellByRef, Param_Cell, Param_Cell);
@@ -1060,6 +1062,27 @@ struct callback_t final : prop_reference_t
 		return false;
 	}
 
+	bool fwd_call_tstr(int client, const SendProp *pProp, const void *old_pData, opaque_ptr &new_pData, int objectID) const noexcept
+	{
+		fwd->PushCell(objectID);
+		fwd->PushString(name.c_str());
+		static char sp_value[4096];
+		strcpy(sp_value, STRING(*reinterpret_cast<const string_t *>(old_pData)));
+		fwd->PushStringEx(sp_value, sizeof(sp_value), SM_PARAM_STRING_UTF8|SM_PARAM_STRING_COPY, SM_PARAM_COPYBACK);
+		fwd->PushCell(sizeof(sp_value));
+		fwd->PushCell(element);
+		fwd->PushCell(client);
+		cell_t res{Pl_Continue};
+		fwd->Execute(&res);
+		if(res == Pl_Changed) {
+			new_pData.emplace<string_t>(1);
+			string_t &new_value{new_pData.get<string_t>(0)};
+			new_value = MAKE_STRING(sp_value);
+			return true;
+		}
+		return false;
+	}
+
 	bool can_call_fwd(int client) const noexcept
 	{
 		if(!fwd || (has_any_per_client_func() && client == -1)) {
@@ -1097,6 +1120,8 @@ struct callback_t final : prop_reference_t
 			return fwd_call_ehandle(client, pProp, old_pData, new_pData, objectID);
 			case prop_types::cstring:
 			return fwd_call_str(client, pProp, old_pData, new_pData, objectID);
+			case prop_types::tstring:
+			return fwd_call_tstr(client, pProp, old_pData, new_pData, objectID);
 		}
 		return false;
 	}
@@ -1512,7 +1537,7 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 
 	const bool any_per_client_hook{slots.size() > 0 && entities.size() > 0};
 
-#if defined _DEBUG && 1
+#if defined _DEBUG && 0
 	printf("slots = %i, entities = %i\n", slots.size(), entities.size());
 	printf("any_hook = %i, any_per_client_hook = %i, is_parallel_pack_allowed = %i\n", any_hook, any_per_client_hook, g_Sample.is_parallel_pack_allowed());
 #endif
