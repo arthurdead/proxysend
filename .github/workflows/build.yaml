@@ -1,0 +1,76 @@
+name: build
+on:
+  push:
+    paths-ignore: [LICENSE, README.md]
+  pull_request:
+    paths-ignore: [LICENSE, README.md]
+jobs:
+  build:
+    name: ${{matrix.os}}-${{matrix.game}}-sm${{matrix.sm}}
+    runs-on: ${{matrix.os}}
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        game: [tf2]
+        sm: ['1.11']
+    steps:
+      - name: setup env
+        shell: bash
+        run: |
+          echo "GITHUB_SHA_SHORT=${GITHUB_SHA::7}" >> $GITHUB_ENV
+      - name: setup linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y clang g++-multilib
+          echo "CC=clang" >> $GITHUB_ENV
+          echo "CXX=clang++" >> $GITHUB_ENV
+      - name: clone hl2sdk
+        uses: actions/checkout@main
+        with:
+          repository: alliedmodders/hl2sdk
+          ref: ${{matrix.game}}
+          path: hl2sdk-${{matrix.game}}
+      - name: clone sourcemod
+        uses: actions/checkout@main
+        with:
+          repository: alliedmodders/sourcemod
+          ref: ${{matrix.branch}}
+          path: sourcemod-${{matrix.sm}}
+          submodules: recursive
+      - name: clone metamod
+        uses: actions/checkout@main
+        with:
+          repository: alliedmodders/metamod-source
+          ref: ${{matrix.branch}}
+          path: metamod-${{matrix.sm}}
+      - name: clone ambuild
+        uses: actions/checkout@main
+        with:
+          repository: alliedmodders/ambuild
+          path: ambuild
+      - name: setup python
+        uses: actions/setup-python@main
+        with:
+          check-latest: true
+          python-version: '>=3'
+      - name: setup ambuild
+        working-directory: ambuild
+        run: python setup.py install
+      - name: clone ext
+        uses: actions/checkout@main
+        with:
+          path: extenson
+      - name: build ext
+        working-directory: extenson
+        run: |
+          mkdir build
+          cd build
+          python ../configure.py --enable-optimize --sm-path="${{github.workspace}}/sourcemod-${{matrix.sm}}" --mms-path="${{github.workspace}}/metamod-${{matrix.sm}}" --sdks=${{matrix.game}}
+          ambuild
+      - name: upload ext
+        uses: actions/upload-artifact@main
+        with:
+          name: ${{matrix.os}}-${{matrix.game}}-sm${{matrix.sm}}-${{env.GITHUB_SHA_SHORT}}
+          path: extenson/build/package
