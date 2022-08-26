@@ -1510,7 +1510,8 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 	}
 
 	for(int i{0}; i < snapshot->m_nValidEntities; ++i) {
-		hooks_t::const_iterator it_hook{chooks.find(snapshot->m_pValidEntities[i])};
+		int ref{gamehelpers->IndexToReference(snapshot->m_pValidEntities[i])};
+		hooks_t::const_iterator it_hook{chooks.find(ref)};
 		if(it_hook != chooks.cend()) {
 			if(!it_hook->second.callbacks.empty()) {
 				any_hook = true;
@@ -1605,7 +1606,8 @@ static void global_send_proxy(const SendProp *pProp, const void *pStructBase, co
 	proxyrestore_t *restore{nullptr};
 
 	const hooks_t &chooks{hooks};
-	hooks_t::const_iterator it_hook{chooks.find(objectID)};
+	int ref{gamehelpers->IndexToReference(objectID)};
+	hooks_t::const_iterator it_hook{chooks.find(ref)};
 	if(it_hook != chooks.cend()) {
 		callbacks_t::const_iterator it_callback{it_hook->second.callbacks.find(pProp)};
 		if(it_callback != it_hook->second.callbacks.cend()) {
@@ -1767,10 +1769,9 @@ static cell_t proxysend_handle_hook(IPluginContext *pContext, hooks_t::iterator 
 
 static cell_t proxysend_hook(IPluginContext *pContext, const cell_t *params) noexcept
 {
-	int idx{gamehelpers->ReferenceToBCompatRef(params[1])};
 	CBaseEntity *pEntity{gamehelpers->ReferenceToEntity(params[1])};
 	if(!pEntity) {
-		return pContext->ThrowNativeError("Invalid Entity Reference/Index %i", idx);
+		return pContext->ThrowNativeError("Invalid Entity Reference/Index %i", params[1]);
 	}
 
 	char *name_ptr;
@@ -1793,9 +1794,11 @@ static cell_t proxysend_hook(IPluginContext *pContext, const cell_t *params) noe
 	SendProp *pProp{info.prop};
 	std::string prop_name{pProp->GetName()};
 
-	hooks_t::iterator it_hook{hooks.find(idx)};
+	int ref = gamehelpers->EntityToReference(pEntity);
+
+	hooks_t::iterator it_hook{hooks.find(ref)};
 	if(it_hook == hooks.end()) {
-		it_hook = hooks.emplace(std::pair<int, proxyhook_t>{idx, proxyhook_t{idx}}).first;
+		it_hook = hooks.emplace(std::pair<int, proxyhook_t>{ref, proxyhook_t{ref}}).first;
 	}
 
 	if(pProp->GetType() == DPT_DataTable) {
@@ -1804,7 +1807,7 @@ static cell_t proxysend_hook(IPluginContext *pContext, const cell_t *params) noe
 		for(int i = 0; i < NumProps; ++i) {
 			SendProp *pChildProp{pPropTable->GetProp(i)};
 			std::string tmp_name{prop_name};
-			cell_t ret{proxysend_handle_hook(pContext, it_hook, idx, info.actual_offset + pChildProp->GetOffset(), pChildProp, std::move(tmp_name), i, pTable, callback, per_client)};
+			cell_t ret{proxysend_handle_hook(pContext, it_hook, ref, info.actual_offset + pChildProp->GetOffset(), pChildProp, std::move(tmp_name), i, pTable, callback, per_client)};
 			if(ret != 0) {
 				return ret;
 			}
@@ -1812,20 +1815,20 @@ static cell_t proxysend_hook(IPluginContext *pContext, const cell_t *params) noe
 		return 0;
 	}
 
-	return proxysend_handle_hook(pContext, it_hook, idx, info.actual_offset, pProp, std::move(prop_name), 0, pTable, callback, per_client);
+	return proxysend_handle_hook(pContext, it_hook, ref, info.actual_offset, pProp, std::move(prop_name), 0, pTable, callback, per_client);
 }
 
-static void proxysend_handle_unhook(hooks_t::iterator it_hook, int idx, const SendProp *pProp, const char *name, IPluginFunction *callback)
+static void proxysend_handle_unhook(hooks_t::iterator it_hook, int ref, const SendProp *pProp, const char *name, IPluginFunction *callback)
 {
 	callbacks_t::iterator it_callback{it_hook->second.callbacks.find(pProp)};
 	if(it_callback != it_hook->second.callbacks.end()) {
 		it_callback->second.remove_function(callback);
 	#ifdef _DEBUG
-		printf("removed func from %s %p callback for %i\n", name, pProp, idx);
+		printf("removed func from %s %p callback for %i\n", name, pProp, ref);
 	#endif
 		if(it_callback->second.fwd->GetFunctionCount() == 0) {
 		#ifdef _DEBUG
-			printf("removed callback %s %p for %i\n", name, pProp, idx);
+			printf("removed callback %s %p for %i\n", name, pProp, ref);
 		#endif
 			it_hook->second.callbacks.erase(it_callback);
 		}
@@ -1834,10 +1837,9 @@ static void proxysend_handle_unhook(hooks_t::iterator it_hook, int idx, const Se
 
 static cell_t proxysend_unhook(IPluginContext *pContext, const cell_t *params) noexcept
 {
-	int idx{gamehelpers->ReferenceToBCompatRef(params[1])};
 	CBaseEntity *pEntity{gamehelpers->ReferenceToEntity(params[1])};
 	if(!pEntity) {
-		return pContext->ThrowNativeError("Invalid Entity Reference/Index %i", idx);
+		return pContext->ThrowNativeError("Invalid Entity Reference/Index %i", params[1]);
 	}
 
 	IServerNetworkable *pNetwork{pEntity->GetNetworkable()};
@@ -1855,17 +1857,19 @@ static cell_t proxysend_unhook(IPluginContext *pContext, const cell_t *params) n
 
 	IPluginFunction *callback{pContext->GetFunctionById(params[3])};
 
-	hooks_t::iterator it_hook{hooks.find(idx)};
+	int ref = gamehelpers->EntityToReference(pEntity);
+
+	hooks_t::iterator it_hook{hooks.find(ref)};
 	if(it_hook != hooks.end()) {
 		if(pProp->GetType() == DPT_DataTable) {
 			SendTable *pPropTable{pProp->GetDataTable()};
 			int NumProps{pPropTable->GetNumProps()};
 			for(int i = 0; i < NumProps; ++i) {
 				SendProp *pChildProp{pPropTable->GetProp(i)};
-				proxysend_handle_unhook(it_hook, idx, pChildProp, name_ptr, callback);
+				proxysend_handle_unhook(it_hook, ref, pChildProp, name_ptr, callback);
 			}
 		} else {
-			proxysend_handle_unhook(it_hook, idx, pProp, name_ptr, callback);
+			proxysend_handle_unhook(it_hook, ref, pProp, name_ptr, callback);
 		}
 		if(it_hook->second.callbacks.empty()) {
 			hooks.erase(it_hook);
@@ -2008,9 +2012,9 @@ void Sample::OnEntityDestroyed(CBaseEntity *pEntity) noexcept
 		return;
 	}
 
-	const int idx{gamehelpers->EntityToBCompatRef(pEntity)};
+	const int ref{gamehelpers->EntityToReference(pEntity)};
 
-	hooks_t::iterator it_hook{hooks.find(idx)};
+	hooks_t::iterator it_hook{hooks.find(ref)};
 	if(it_hook != hooks.end()) {
 		hooks.erase(it_hook);
 	}
