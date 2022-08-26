@@ -925,7 +925,7 @@ struct callback_t final : prop_reference_t
 	bool fwd_call_ehandle(int client, const SendProp *pProp, const void *old_pData, opaque_ptr &new_pData, int objectID) const noexcept
 	{
 		fwd->PushCell(objectID);
-		fwd->PushString(name.c_str());
+		fwd->PushStringEx((char *)name.c_str(), name.size(), SM_PARAM_STRING_COPY|SM_PARAM_STRING_UTF8, 0);
 		const CBaseHandle &hndl{*reinterpret_cast<const CBaseHandle *>(old_pData)};
 		edict_t *edict{gamehelpers->GetHandleEntity(const_cast<CBaseHandle &>(hndl))};
 		cell_t sp_value{static_cast<cell_t>(edict ? gamehelpers->IndexOfEdict(edict) : -1)};
@@ -949,7 +949,7 @@ struct callback_t final : prop_reference_t
 	bool fwd_call_color32(int client, const SendProp *pProp, const void *old_pData, opaque_ptr &new_pData, int objectID) const noexcept
 	{
 		fwd->PushCell(objectID);
-		fwd->PushString(name.c_str());
+		fwd->PushStringEx((char *)name.c_str(), name.size(), SM_PARAM_STRING_COPY|SM_PARAM_STRING_UTF8, 0);
 		const color32 &clr{*reinterpret_cast<const color32 *>(old_pData)};
 		cell_t sp_r{static_cast<cell_t>(clr.r)};
 		cell_t sp_g{static_cast<cell_t>(clr.g)};
@@ -979,7 +979,7 @@ struct callback_t final : prop_reference_t
 	bool fwd_call_int(int client, const SendProp *pProp, const void *old_pData, opaque_ptr &new_pData, int objectID) const noexcept
 	{
 		fwd->PushCell(objectID);
-		fwd->PushString(name.c_str());
+		fwd->PushStringEx((char *)name.c_str(), name.size(), SM_PARAM_STRING_COPY|SM_PARAM_STRING_UTF8, 0);
 		cell_t sp_value{static_cast<cell_t>(*reinterpret_cast<const T *>(old_pData))};
 		fwd->PushCellByRef(&sp_value);
 		fwd->PushCell(element);
@@ -998,7 +998,7 @@ struct callback_t final : prop_reference_t
 	bool fwd_call_float(int client, const SendProp *pProp, const void *old_pData, opaque_ptr &new_pData, int objectID) const noexcept
 	{
 		fwd->PushCell(objectID);
-		fwd->PushString(name.c_str());
+		fwd->PushStringEx((char *)name.c_str(), name.size(), SM_PARAM_STRING_COPY|SM_PARAM_STRING_UTF8, 0);
 		float sp_value{static_cast<float>(*reinterpret_cast<const float *>(old_pData))};
 		fwd->PushFloatByRef(&sp_value);
 		fwd->PushCell(element);
@@ -1018,7 +1018,7 @@ struct callback_t final : prop_reference_t
 	bool fwd_call_vec(int client, const SendProp *pProp, const void *old_pData, opaque_ptr &new_pData, int objectID) const noexcept
 	{
 		fwd->PushCell(objectID);
-		fwd->PushString(name.c_str());
+		fwd->PushStringEx((char *)name.c_str(), name.size(), SM_PARAM_STRING_COPY|SM_PARAM_STRING_UTF8, 0);
 		const T &vec{*reinterpret_cast<const T *>(old_pData)};
 		cell_t sp_value[3]{
 			sp_ftoc(vec[0]),
@@ -1044,7 +1044,7 @@ struct callback_t final : prop_reference_t
 	bool fwd_call_str(int client, const SendProp *pProp, const void *old_pData, opaque_ptr &new_pData, int objectID) const noexcept
 	{
 		fwd->PushCell(objectID);
-		fwd->PushString(name.c_str());
+		fwd->PushStringEx((char *)name.c_str(), name.size(), SM_PARAM_STRING_COPY|SM_PARAM_STRING_UTF8, 0);
 		static char sp_value[4096];
 		strcpy(sp_value, reinterpret_cast<const char *>(old_pData));
 		fwd->PushStringEx(sp_value, sizeof(sp_value), SM_PARAM_STRING_UTF8|SM_PARAM_STRING_COPY, SM_PARAM_COPYBACK);
@@ -1065,7 +1065,7 @@ struct callback_t final : prop_reference_t
 	bool fwd_call_tstr(int client, const SendProp *pProp, const void *old_pData, opaque_ptr &new_pData, int objectID) const noexcept
 	{
 		fwd->PushCell(objectID);
-		fwd->PushString(name.c_str());
+		fwd->PushStringEx((char *)name.c_str(), name.size(), SM_PARAM_STRING_COPY|SM_PARAM_STRING_UTF8, 0);
 		static char sp_value[4096];
 		strcpy(sp_value, STRING(*reinterpret_cast<const string_t *>(old_pData)));
 		fwd->PushStringEx(sp_value, sizeof(sp_value), SM_PARAM_STRING_UTF8|SM_PARAM_STRING_COPY, SM_PARAM_COPYBACK);
