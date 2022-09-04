@@ -595,14 +595,14 @@ struct packed_entity_data_t final
 		other.packedData = nullptr;
 		writeBuf = other.writeBuf;
 		other.writeBuf = nullptr;
-		objectID = other.objectID;
-		other.objectID = -1;
+		ref = other.ref;
+		other.ref = INVALID_EHANDLE_INDEX;
 		return *this;
 	}
 
 	char *packedData{nullptr};
 	bf_write *writeBuf{nullptr};
-	int objectID{-1};
+	int ref{INVALID_EHANDLE_INDEX};
 
 	packed_entity_data_t() noexcept = default;
 	~packed_entity_data_t() noexcept {
@@ -643,9 +643,6 @@ struct pack_entity_params_t final
 		: slots{std::move(slots_)}, entities{std::move(entities_)}, snapshot_index{snapshot_index_}
 	{
 		entity_data.resize(slots.size());
-		for(auto &it : entity_data) {
-			it.reserve(entities_.size());
-		}
 	}
 	~pack_entity_params_t() noexcept = default;
 
@@ -1259,14 +1256,16 @@ DETOUR_DECL_STATIC6(SendTable_Encode, bool, const SendTable *, pTable, const voi
 		}
 	}
 
+	int ref{gamehelpers->IndexToReference(objectID)};
+
 	const std::vector<int> &entities{packentity_params->entities};
 
-	if(std::find(entities.cbegin(), entities.cend(), objectID) != entities.cend()) {
+	if(std::find(entities.cbegin(), entities.cend(), ref) != entities.cend()) {
 		const std::size_t slots_size{packentity_params->slots.size()};
 		for(int i{0}; i < slots_size; ++i) {
 			packed_entity_data_t &packedData{packentity_params->entity_data[i].emplace_back()};
 
-			packedData.objectID = objectID;
+			packedData.ref = ref;
 			packedData.allocate();
 
 			sendproxy_client_slot = packentity_params->slots[i];
@@ -1400,12 +1399,14 @@ DETOUR_DECL_MEMBER2(CFrameSnapshotManager_GetPackedEntity, PackedEntity *, CFram
 
 	const int slot{writedeltaentities_client};
 
+	int ref{gamehelpers->IndexToReference(entity)};
+
 	const packed_entity_data_t *packedData{nullptr};
 	for(int i{0}; i < packentity_params->slots.size(); ++i) {
 		if(packentity_params->slots[i] == slot) {
 			const std::vector<packed_entity_data_t> &entity_data{packentity_params->entity_data[i]};
 			for(const packed_entity_data_t &it : entity_data) {
-				if(it.objectID == entity) {
+				if(it.ref == ref) {
 					packedData = &it;
 					break;
 				}
@@ -1490,7 +1491,6 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 
 	std::vector<int> slots{};
 
-	slots.reserve(clientCount);
 	for(int i{0}; i < clientCount; ++i) {
 		CGameClient *client{clients[i]};
 		if(!is_client_valid(client)) {
@@ -1505,12 +1505,9 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 
 	const hooks_t &chooks{hooks};
 
-	if(slots.size() > 0) {
-		entities.reserve(snapshot->m_nValidEntities);
-	}
-
 	for(int i{0}; i < snapshot->m_nValidEntities; ++i) {
-		int ref{gamehelpers->IndexToReference(snapshot->m_pValidEntities[i])};
+		int idx{snapshot->m_pValidEntities[i]};
+		int ref{gamehelpers->IndexToReference(idx)};
 		hooks_t::const_iterator it_hook{chooks.find(ref)};
 		if(it_hook != chooks.cend()) {
 			if(!it_hook->second.callbacks.empty()) {
@@ -1528,7 +1525,7 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 					}
 				}
 				if(any_per_client_func) {
-					entities.emplace_back(snapshot->m_pValidEntities[i]);
+					entities.emplace_back(ref);
 				}
 			}
 		}
