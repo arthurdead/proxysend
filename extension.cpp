@@ -395,7 +395,12 @@ public:
 	{ return get_ptr(); }
 
 	inline ~thread_var_base() noexcept
-	{ reset_ptr(nullptr); }
+	{
+		reset_ptr(nullptr);
+		if(allocated_) {
+			unallocate();
+		}
+	}
 
 protected:
 	static constexpr const pthread_key_t invalid_key{PTHREAD_KEYS_MAX+1};
@@ -449,16 +454,10 @@ protected:
 		if(old_ptr) {
 			delete old_ptr;
 		}
-		if(ptr) {
-			if(!allocated_ && !allocate()) {
-				return;
-			}
-			pthread_setspecific(key, ptr);
-		} else {
-			if(allocated_ && !unallocate()) {
-				return;
-			}
+		if(!allocated_ && !allocate()) {
+			return;
 		}
+		pthread_setspecific(key, ptr);
 	}
 
 private:
@@ -1245,6 +1244,8 @@ static hooks_t hooks;
 
 DETOUR_DECL_STATIC6(SendTable_Encode, bool, const SendTable *, pTable, const void *, pStruct, bf_write *, pOut, int, objectID, CUtlMemory<CSendProxyRecipients> *, pRecipients, bool, bNonZeroOnly)
 {
+	do_calc_delta = nullptr;
+
 	if(!packentity_params || !in_compute_packs) {
 		return DETOUR_STATIC_CALL(SendTable_Encode)(pTable, pStruct, pOut, objectID, pRecipients, bNonZeroOnly);
 	}
@@ -1290,6 +1291,8 @@ DETOUR_DECL_STATIC8(SendTable_CalcDelta, int, const SendTable *, pTable, const v
 		return DETOUR_STATIC_CALL(SendTable_CalcDelta)(pTable, pFromState, nFromBits, pToState, nToBits, pDeltaProps, nMaxDeltaProps, objectID);
 	}
 
+	do_calc_delta = nullptr;
+
 	int global_nChanges{DETOUR_STATIC_CALL(SendTable_CalcDelta)(pTable, pFromState, nFromBits, pToState, nToBits, pDeltaProps, nMaxDeltaProps, objectID)};
 
 	if(global_nChanges < nMaxDeltaProps) {
@@ -1331,8 +1334,6 @@ DETOUR_DECL_STATIC8(SendTable_CalcDelta, int, const SendTable *, pTable, const v
 
 		delete[] client_deltaProps;
 	}
-
-	do_calc_delta = nullptr;
 
 	if(global_nChanges > nMaxDeltaProps) {
 		global_nChanges = nMaxDeltaProps;
@@ -1560,7 +1561,7 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 
 	in_compute_packs = true;
 	DETOUR_STATIC_CALL(SV_ComputeClientPacks)(clientCount, clients, snapshot);
-	in_compute_packs = false;
+	in_compute_packs = nullptr;
 
 	if(!sv_parallel_packentities->GetBool() && any_per_client_hook) {
 		SendTable_Encode_detour->DisableDetour();
