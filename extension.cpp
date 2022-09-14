@@ -396,7 +396,6 @@ public:
 
 	inline ~thread_var_base() noexcept
 	{
-		reset_ptr(nullptr);
 		if(allocated_) {
 			unallocate();
 		}
@@ -432,18 +431,39 @@ protected:
 		}
 	}
 
+	T *get_or_allocate_ptr() noexcept
+	{
+		if(!allocated_ && !allocate()) {
+			return nullptr;
+		}
+		T *ptr{reinterpret_cast<T *>(pthread_getspecific(key))};
+		if(!ptr) {
+			ptr = new T{};
+			pthread_setspecific(key, ptr);
+		}
+		return ptr;
+	}
+
 	bool allocate() noexcept
 	{
 		if(!__sync_bool_compare_and_swap(&allocated_, 0, 1)) {
 			return true;
 		}
-		return (pthread_key_create(&key, dtor) == 0);
+		if(pthread_key_create(&key, dtor) != 0) {
+			return false;
+		}
+		pthread_setspecific(key, new T{});
+		return true;
 	}
 
 	bool unallocate() noexcept
 	{
 		if(!__sync_bool_compare_and_swap(&allocated_, 1, 0)) {
 			return true;
+		}
+		T *old_ptr{reinterpret_cast<T *>(pthread_getspecific(key))};
+		if(old_ptr) {
+			delete old_ptr;
 		}
 		return (pthread_key_delete(key) == 0);
 	}
@@ -488,20 +508,25 @@ public:
 	template <typename ...Args>
 	T &reset(Args &&...args) noexcept
 	{
-		T *ptr{new T{std::forward<Args>(args)...}};
-		this->reset_ptr(ptr);
+		T *ptr{this->get_or_allocate_ptr()};
+		ptr->~T();
+		new (ptr) T{std::forward<Args>(args)...};
 		return *ptr;
 	}
 
 	inline thread_var(const T &val) noexcept
-	{ this->reset_ptr(new T{val}); }
+	{ *this->get_or_allocate_ptr() = val; }
 
 	inline thread_var(T &&val) noexcept
-	{ this->reset_ptr(new T{std::move(val)}); }
+	{ *this->get_or_allocate_ptr() = std::move(val); }
 
 	template <typename ...Args>
 	inline thread_var(Args &&...args) noexcept
-	{ this->reset_ptr(new T{std::forward<Args>(args)...}); }
+	{
+		T *ptr{this->get_or_allocate_ptr()};
+		ptr->~T();
+		new (ptr) T{std::forward<Args>(args)...};
+	}
 
 	thread_var &operator=(std::nullptr_t) noexcept
 	{
@@ -511,13 +536,13 @@ public:
 
 	thread_var &operator=(const T &val) noexcept
 	{
-		this->reset_ptr(new T{val});
+		*this->get_or_allocate_ptr() = val;
 		return *this;
 	}
 
 	thread_var &operator=(T &&val) noexcept
 	{
-		this->reset_ptr(new T{std::move(val)});
+		*this->get_or_allocate_ptr() = std::move(val);
 		return *this;
 	}
 
@@ -577,11 +602,7 @@ public:
 private:
 	void set_value(bool val) noexcept
 	{
-		if(val) {
-			this->reset_ptr(new bool{true});
-		} else {
-			this->reset_ptr(nullptr);
-		}
+		*this->get_or_allocate_ptr() = val;
 	}
 };
 
@@ -1244,7 +1265,7 @@ static hooks_t hooks;
 
 DETOUR_DECL_STATIC6(SendTable_Encode, bool, const SendTable *, pTable, const void *, pStruct, bf_write *, pOut, int, objectID, CUtlMemory<CSendProxyRecipients> *, pRecipients, bool, bNonZeroOnly)
 {
-	do_calc_delta = nullptr;
+	do_calc_delta = false;
 
 	if(!packentity_params || !in_compute_packs) {
 		return DETOUR_STATIC_CALL(SendTable_Encode)(pTable, pStruct, pOut, objectID, pRecipients, bNonZeroOnly);
@@ -1271,7 +1292,7 @@ DETOUR_DECL_STATIC6(SendTable_Encode, bool, const SendTable *, pTable, const voi
 
 			sendproxy_client_slot = packentity_params->slots[i];
 			const bool encoded{DETOUR_STATIC_CALL(SendTable_Encode)(pTable, pStruct, packedData.writeBuf, objectID, pRecipients, bNonZeroOnly)};
-			sendproxy_client_slot = nullptr;
+			sendproxy_client_slot = -1;
 			if(!encoded) {
 				Host_Error( "SV_PackEntity: SendTable_Encode returned false (ent %d).\n", objectID );
 				return false;
@@ -1291,7 +1312,7 @@ DETOUR_DECL_STATIC8(SendTable_CalcDelta, int, const SendTable *, pTable, const v
 		return DETOUR_STATIC_CALL(SendTable_CalcDelta)(pTable, pFromState, nFromBits, pToState, nToBits, pDeltaProps, nMaxDeltaProps, objectID);
 	}
 
-	do_calc_delta = nullptr;
+	do_calc_delta = false;
 
 	int global_nChanges{DETOUR_STATIC_CALL(SendTable_CalcDelta)(pTable, pFromState, nFromBits, pToState, nToBits, pDeltaProps, nMaxDeltaProps, objectID)};
 
@@ -1451,12 +1472,12 @@ static bool is_client_valid(CBaseClient *client) noexcept
 DETOUR_DECL_MEMBER4(CBaseServer_WriteDeltaEntities, void, CBaseClient *, client, CClientFrame *, to, CClientFrame *, from, bf_write &, pBuf)
 {
 	if(!is_client_valid(client)) {
-		writedeltaentities_client = nullptr;
+		writedeltaentities_client = -1;
 	} else {
 		writedeltaentities_client = client->GetPlayerSlot();
 	}
 	DETOUR_MEMBER_CALL(CBaseServer_WriteDeltaEntities)(client, to, from, pBuf);
-	writedeltaentities_client = nullptr;
+	writedeltaentities_client = -1;
 }
 
 static ConVar *sv_parallel_packentities{nullptr};
@@ -1561,7 +1582,7 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 
 	in_compute_packs = true;
 	DETOUR_STATIC_CALL(SV_ComputeClientPacks)(clientCount, clients, snapshot);
-	in_compute_packs = nullptr;
+	in_compute_packs = false;
 
 	if(!sv_parallel_packentities->GetBool() && any_per_client_hook) {
 		SendTable_Encode_detour->DisableDetour();
