@@ -1410,7 +1410,7 @@ private:
 
 DETOUR_DECL_MEMBER2(CFrameSnapshotManager_GetPackedEntity, PackedEntity *, CFrameSnapshot *, pSnapshot, int, entity)
 {
-	if(!packentity_params || !writedeltaentities_client || packentity_params->snapshot_index != pSnapshot->m_ListIndex) {
+	if(!pSnapshot || !packentity_params || !writedeltaentities_client || packentity_params->snapshot_index != pSnapshot->m_ListIndex) {
 		return DETOUR_MEMBER_CALL(CFrameSnapshotManager_GetPackedEntity)(pSnapshot, entity);
 	}
 
