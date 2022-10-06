@@ -12,6 +12,7 @@ typeset proxysend_callbacks
 	function Action (int entity, const char[] prop, RoundState &value, int element, int client);
 	function Action (int entity, const char[] prop, RenderMode &value, int element, int client);
 	function Action (int entity, const char[] prop, RenderFx &value, int element, int client);
+	function Action (int entity, const char[] prop, TFClassType &value, int element, int client);
 
 	function Action (int entity, const char[] prop, bool &value, int element, int client);
 
