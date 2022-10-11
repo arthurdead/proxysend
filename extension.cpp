@@ -2022,7 +2022,9 @@ void Sample::SDK_OnUnload() noexcept
 
 	smutils->RemoveGameFrameHook(game_frame);
 	plsys->RemovePluginsListener(this);
-	g_pSDKHooks->RemoveEntityListener(this);
+	if(g_pSDKHooks) {
+		g_pSDKHooks->RemoveEntityListener(this);
+	}
 }
 
 void Sample::OnEntityDestroyed(CBaseEntity *pEntity) noexcept
@@ -2057,6 +2059,28 @@ void Sample::OnPluginUnloaded(IPlugin *plugin) noexcept
 			continue;
 		}
 		++it_hook;
+	}
+}
+
+bool Sample::QueryRunning(char *error, size_t maxlength)
+{
+	SM_CHECK_IFACE(SDKHOOKS, g_pSDKHooks);
+	return true;
+}
+
+bool Sample::QueryInterfaceDrop(SMInterface *pInterface)
+{
+	if(pInterface == g_pSDKHooks)
+		return false;
+	return IExtensionInterface::QueryInterfaceDrop(pInterface);
+}
+
+void Sample::NotifyInterfaceDrop(SMInterface *pInterface)
+{
+	if(strcmp(pInterface->GetInterfaceName(), SMINTERFACE_SDKHOOKS_NAME) == 0)
+	{
+		g_pSDKHooks->RemoveEntityListener(this);
+		g_pSDKHooks = NULL;
 	}
 }
 

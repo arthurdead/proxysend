@@ -60,6 +60,9 @@ public:
 	virtual void OnPluginUnloaded(IPlugin *plugin) noexcept override final;
 	virtual void OnEntityDestroyed(CBaseEntity *pEntity) noexcept override final;
 
+	virtual void NotifyInterfaceDrop(SMInterface *pInterface);
+	virtual bool QueryInterfaceDrop(SMInterface *pInterface);
+
 	/**
 	 * @brief This is called after the initial loading sequence has been processed.
 	 *
@@ -93,7 +96,7 @@ public:
 	 * @param maxlen	Size of error message buffer.
 	 * @return			True if working, false otherwise.
 	 */
-	//virtual bool QueryRunning(char *error, size_t maxlen);
+	virtual bool QueryRunning(char *error, size_t maxlen);
 public:
 #if defined SMEXT_CONF_METAMOD
 	/**
