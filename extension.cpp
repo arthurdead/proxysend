@@ -816,8 +816,8 @@ private:
 
 struct callback_t final : prop_reference_t
 {
-	callback_t(int index_, SendProp *pProp, std::string &&name_, int element_, prop_types type_, std::size_t offset_) noexcept
-		: prop_reference_t{pProp, type_}, offset{offset_}, type{type_}, element{element_}, name{std::move(name_)}, prop{pProp}, index{index_}
+	callback_t(int ref_, SendProp *pProp, std::string &&name_, int element_, prop_types type_, std::size_t offset_) noexcept
+		: prop_reference_t{pProp, type_}, offset{offset_}, type{type_}, element{element_}, name{std::move(name_)}, prop{pProp}, ref{ref_}
 	{
 		if(type == prop_types::cstring || type == prop_types::tstring) {
 			fwd = forwards->CreateForwardEx(nullptr, ET_Hook, 6, nullptr, Param_Cell, Param_String, Param_String, Param_Cell, Param_Cell, Param_Cell);
@@ -855,8 +855,9 @@ struct callback_t final : prop_reference_t
 
 	void change_edict_state() noexcept
 	{
-		if(index != -1) {
-			edict_t *edict{gamehelpers->EdictOfIndex(index)};
+		if(ref != INVALID_EHANDLE_INDEX) {
+			CBaseEntity *pEntity{gamehelpers->ReferenceToEntity(ref)};
+			edict_t *edict{pEntity->GetNetworkable()->GetEdict()};
 			if(edict) {
 				gamehelpers->SetEdictStateChanged(edict, offset);
 			}
@@ -1166,8 +1167,8 @@ struct callback_t final : prop_reference_t
 		other.prop = nullptr;
 		offset = other.offset;
 		type = other.type;
-		index = other.index;
-		other.index = -1;
+		ref = other.ref;
+		other.ref = INVALID_EHANDLE_INDEX;
 		name = std::move(other.name);
 		element = other.element;
 		other.element = 0;
@@ -1181,7 +1182,7 @@ struct callback_t final : prop_reference_t
 	int element{0};
 	std::string name{};
 	SendProp *prop{nullptr};
-	int index{-1};
+	int ref{INVALID_EHANDLE_INDEX};
 
 	struct per_client_func_t
 	{
@@ -1222,10 +1223,10 @@ using callbacks_t = std::unordered_map<const SendProp *, callback_t>;
 struct proxyhook_t final
 {
 	callbacks_t callbacks;
-	int index{-1};
+	int ref{INVALID_EHANDLE_INDEX};
 
-	inline proxyhook_t(int index_) noexcept
-		: index{index_}
+	inline proxyhook_t(int ref_) noexcept
+		: ref{ref_}
 	{
 	}
 
@@ -1237,7 +1238,7 @@ struct proxyhook_t final
 	{
 		callbacks_t::iterator it_callback{callbacks.find(pProp)};
 		if(it_callback == callbacks.end()) {
-			it_callback = callbacks.emplace(std::pair<const SendProp *, callback_t>{pProp, callback_t{index, pProp, std::move(name), element, type, offset}}).first;
+			it_callback = callbacks.emplace(std::pair<const SendProp *, callback_t>{pProp, callback_t{ref, pProp, std::move(name), element, type, offset}}).first;
 		}
 
 		it_callback->second.add_function(func, per_client);
@@ -1249,8 +1250,8 @@ struct proxyhook_t final
 	proxyhook_t &operator=(proxyhook_t &&other) noexcept
 	{
 		callbacks = std::move(other.callbacks);
-		index = other.index;
-		other.index = -1;
+		ref = other.ref;
+		other.ref = INVALID_EHANDLE_INDEX;
 		return *this;
 	}
 
@@ -1530,13 +1531,18 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 	for(int i{0}; i < snapshot->m_nValidEntities; ++i) {
 		int idx{snapshot->m_pValidEntities[i]};
 		int ref{gamehelpers->IndexToReference(idx)};
+
+		for(auto it : g_Sample.pack_ent_listeners) {
+			CBaseEntity *pEntity{gamehelpers->ReferenceToEntity(ref)};
+			if(pEntity) {
+				it->pre_pack_entity(pEntity);
+			}
+		}
+
 		hooks_t::const_iterator it_hook{chooks.find(ref)};
 		if(it_hook != chooks.cend()) {
 			if(!it_hook->second.callbacks.empty()) {
 				any_hook = true;
-				if(slots.size() == 0) {
-					break;
-				}
 			}
 			if(slots.size() > 0) {
 				bool any_per_client_func{false};
