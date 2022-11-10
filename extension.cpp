@@ -150,6 +150,7 @@ static void global_send_proxy(const SendProp *pProp, const void *pStructBase, co
 
 static const CStandardSendProxies *std_proxies;
 
+#if SOURCE_ENGINE == SE_TF2
 static const SendProp *m_nPlayerCond{nullptr};
 static const SendProp *_condition_bits{nullptr};
 static const SendProp *m_nPlayerCondEx{nullptr};
@@ -166,6 +167,7 @@ static bool is_prop_cond(const SendProp *pProp)
 			pProp == m_nPlayerCondEx3 ||
 			pProp == m_nPlayerCondEx4);
 }
+#endif
 
 static prop_types guess_prop_type(const SendProp *pProp, const SendTable *pTable) noexcept
 {
@@ -181,12 +183,14 @@ static prop_types guess_prop_type(const SendProp *pProp, const SendTable *pTable
 		return prop_types::unknown;
 	}
 
+#if SOURCE_ENGINE == SE_TF2
 	if(is_prop_cond(pProp)) {
 	#if defined _DEBUG
 		printf("unsigned int (is cond)\n");
 	#endif
 		return prop_types::unsigned_int;
 	}
+#endif
 
 	switch(pProp->GetType()) {
 		case DPT_Int: {
@@ -1146,11 +1150,14 @@ struct callback_t final : prop_reference_t
 
 	void proxy_call(const SendProp *pProp, const void *pStructBase, const void *pOldData, const void *pNewData, DVariant *pOut, int iElement, int objectID) const noexcept
 	{
+	#if SOURCE_ENGINE == SE_TF2
 		if(is_prop_cond(pProp)) {
 			DVariant ignore{};
 			restore->pRealProxy(nullptr, nullptr, pOldData, &ignore, -1, -1);
 			std_proxies->m_UInt32ToInt32(pProp, pStructBase, pNewData, pOut, iElement, objectID);
-		} else {
+		} else
+	#endif
+		{
 			restore->pRealProxy(pProp, pStructBase, pNewData, pOut, iElement, objectID);
 		}
 	}
@@ -1559,8 +1566,6 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 		}
 	}
 
-	sv_parallel_sendsnapshot->SetValue(true);
-
 	const bool any_per_client_hook{slots.size() > 0 && entities.size() > 0};
 
 #if defined _DEBUG && 0
@@ -1581,10 +1586,13 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 		SendTable_CalcDelta_detour->DisableDetour();
 	}
 
-	sv_parallel_packentities->SetValue(
+	const bool parallel_pack{
 		!any_hook &&
 		g_Sample.is_parallel_pack_allowed()
-	);
+	};
+
+	sv_parallel_sendsnapshot->SetValue(true);
+	sv_parallel_packentities->SetValue(parallel_pack);
 
 	in_compute_packs = true;
 	DETOUR_STATIC_CALL(SV_ComputeClientPacks)(clientCount, clients, snapshot);
@@ -1918,28 +1926,76 @@ static CDetour *CGameServer_SendClientMessages_detour{nullptr};
 
 bool Sample::SDK_OnLoad(char *error, size_t maxlen, bool late) noexcept
 {
-	gameconfs->LoadGameConfigFile("proxysend", &gameconf, nullptr, 0);
+	if(!gameconfs->LoadGameConfigFile("proxysend", &gameconf, error, maxlen)) {
+		return false;
+	}
 
 	IGameConfig *coregameconf{nullptr};
-	gameconfs->LoadGameConfigFile("core.games/common.games", &coregameconf, nullptr, 0);
+	if(!gameconfs->LoadGameConfigFile("core.games/common.games", &coregameconf, error, maxlen)) {
+		return false;
+	}
 
 	coregameconf->GetOffset("CSendPropExtra_UtlVector::m_Offset", &utlVecOffsetOffset);
 
 	gameconfs->CloseGameConfigFile(coregameconf);
 
-	CDetourManager::Init(smutils->GetScriptingEngine(), gameconf);
-
 	gameconf->GetOffset("CBaseClient::UpdateSendState", &CBaseClient_UpdateSendState_idx);
+	if(CBaseClient_UpdateSendState_idx == -1) {
+		snprintf(error, maxlen, "could not get CBaseClient::UpdateSendState offset");
+		return false;
+	}
+
 	gameconf->GetOffset("CBaseClient::SendSnapshot", &CBaseClient_SendSnapshot_idx);
+	if(CBaseClient_SendSnapshot_idx == -1) {
+		snprintf(error, maxlen, "could not get CBaseClient::SendSnapshot offset");
+		return false;
+	}
 
 	gameconf->GetMemSig("CGameClient::GetSendFrame", &CGameClient_GetSendFrame_ptr);
+	if(CGameClient_GetSendFrame_ptr == nullptr) {
+		snprintf(error, maxlen, "could not get CGameClient::GetSendFrame address");
+		return false;
+	}
+
+	CDetourManager::Init(smutils->GetScriptingEngine(), gameconf);
 
 	SendTable_CalcDelta_detour = DETOUR_CREATE_STATIC(SendTable_CalcDelta, "SendTable_CalcDelta");
+	if(!SendTable_CalcDelta_detour) {
+		snprintf(error, maxlen, "could not create SendTable_CalcDelta detour");
+		return false;
+	}
+
 	SendTable_Encode_detour = DETOUR_CREATE_STATIC(SendTable_Encode, "SendTable_Encode");
+	if(!SendTable_Encode_detour) {
+		snprintf(error, maxlen, "could not create SendTable_Encode detour");
+		return false;
+	}
 
 	SV_ComputeClientPacks_detour = DETOUR_CREATE_STATIC(SV_ComputeClientPacks, "SV_ComputeClientPacks");
-	SV_ComputeClientPacks_detour->EnableDetour();
+	if(!SV_ComputeClientPacks_detour) {
+		snprintf(error, maxlen, "could not create SV_ComputeClientPacks detour");
+		return false;
+	}
 
+	CGameServer_SendClientMessages_detour = DETOUR_CREATE_MEMBER(CGameServer_SendClientMessages, "CGameServer::SendClientMessages");
+	if(!CGameServer_SendClientMessages_detour) {
+		snprintf(error, maxlen, "could not create CGameServer::SendClientMessages detour");
+		return false;
+	}
+
+	CFrameSnapshotManager_GetPackedEntity_detour = DETOUR_CREATE_MEMBER(CFrameSnapshotManager_GetPackedEntity, "CFrameSnapshotManager::GetPackedEntity");
+	if(!CFrameSnapshotManager_GetPackedEntity_detour) {
+		snprintf(error, maxlen, "could not create CFrameSnapshotManager::GetPackedEntity detour");
+		return false;
+	}
+
+	CBaseServer_WriteDeltaEntities_detour = DETOUR_CREATE_MEMBER(CBaseServer_WriteDeltaEntities, "CBaseServer::WriteDeltaEntities");
+	if(!CBaseServer_WriteDeltaEntities_detour) {
+		snprintf(error, maxlen, "could not create CBaseServer::WriteDeltaEntities detour");
+		return false;
+	}
+
+#if 0
 	//SV_PackEntity_detour = DETOUR_CREATE_STATIC(SV_PackEntity, "SV_PackEntity");
 	//SV_PackEntity_detour->EnableDetour();
 
@@ -1948,12 +2004,10 @@ bool Sample::SDK_OnLoad(char *error, size_t maxlen, bool late) noexcept
 
 	//InvalidateSharedEdictChangeInfos_detour = DETOUR_CREATE_STATIC(InvalidateSharedEdictChangeInfos, "InvalidateSharedEdictChangeInfos");
 	//InvalidateSharedEdictChangeInfos_detour->EnableDetour();
+#endif
 
-	CGameServer_SendClientMessages_detour = DETOUR_CREATE_MEMBER(CGameServer_SendClientMessages, "CGameServer::SendClientMessages");
 	CGameServer_SendClientMessages_detour->EnableDetour();
-
-	CFrameSnapshotManager_GetPackedEntity_detour = DETOUR_CREATE_MEMBER(CFrameSnapshotManager_GetPackedEntity, "CFrameSnapshotManager::GetPackedEntity");
-	CBaseServer_WriteDeltaEntities_detour = DETOUR_CREATE_MEMBER(CBaseServer_WriteDeltaEntities, "CBaseServer::WriteDeltaEntities");
+	SV_ComputeClientPacks_detour->EnableDetour();
 
 	sharesys->AddDependency(myself, "sdkhooks.ext", true, true);
 
@@ -1965,6 +2019,7 @@ bool Sample::SDK_OnLoad(char *error, size_t maxlen, bool late) noexcept
 
 	sharesys->AddNatives(myself, natives);
 
+#if SOURCE_ENGINE == SE_TF2
 	sm_sendprop_info_t info{};
 	gamehelpers->FindSendPropInfo("CTFPlayer", "m_nPlayerCond", &info);
 	m_nPlayerCond = info.prop;
@@ -1978,6 +2033,7 @@ bool Sample::SDK_OnLoad(char *error, size_t maxlen, bool late) noexcept
 	m_nPlayerCondEx3 = info.prop;
 	gamehelpers->FindSendPropInfo("CTFPlayer", "m_nPlayerCondEx4", &info);
 	m_nPlayerCondEx4 = info.prop;
+#endif
 
 	return true;
 }
