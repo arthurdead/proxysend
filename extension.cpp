@@ -949,19 +949,22 @@ struct callback_t final : prop_reference_t
 		fwd->PushCell(objectID);
 		fwd->PushStringEx((char *)name.c_str(), name.size()+1, SM_PARAM_STRING_COPY|SM_PARAM_STRING_UTF8, 0);
 		const CBaseHandle &hndl{*reinterpret_cast<const CBaseHandle *>(old_pData)};
-		edict_t *edict{gamehelpers->GetHandleEntity(const_cast<CBaseHandle &>(hndl))};
-		cell_t sp_value{static_cast<cell_t>(edict ? gamehelpers->IndexOfEdict(edict) : -1)};
+		cell_t sp_value{gamehelpers->ReferenceToBCompatRef(hndl.ToInt())};
 		fwd->PushCellByRef(&sp_value);
 		fwd->PushCell(element);
 		fwd->PushCell(client);
 		cell_t res{Pl_Continue};
 		fwd->Execute(&res);
 		if(res == Pl_Changed) {
-			edict = gamehelpers->EdictOfIndex(sp_value);
 			new_pData.emplace<CBaseHandle>(1);
 			CBaseHandle &new_value{new_pData.get<CBaseHandle>(0)};
-			if(edict) {
-				gamehelpers->SetHandleEntity(new_value, edict);
+			new_value.Term();
+			CBaseEntity *pEntity = gamehelpers->ReferenceToEntity(sp_value);
+			if(pEntity) {
+				edict_t *edict{pEntity->GetNetworkable()->GetEdict()};
+				if(edict) {
+					gamehelpers->SetHandleEntity(new_value, edict);
+				}
 			}
 			return true;
 		}
@@ -1373,20 +1376,6 @@ DETOUR_DECL_STATIC8(SendTable_CalcDelta, int, const SendTable *, pTable, const v
 
 class CFrameSnapshot
 {
-	DECLARE_FIXEDSIZE_ALLOCATOR( CFrameSnapshot );
-
-public:
-
-							CFrameSnapshot();
-							~CFrameSnapshot();
-
-	// Reference-counting.
-	void					AddReference();
-	void					ReleaseReference();
-
-	CFrameSnapshot*			NextSnapshot() const;						
-
-
 public:
 	CInterlockedInt			m_ListIndex;	// Index info CFrameSnapshotManager::m_FrameSnapshots.
 
@@ -1754,14 +1743,24 @@ static bool UTIL_FindInSendTable(SendTable *pTable,
 	return false;
 }
 
-static std::unordered_map<std::string, std::unordered_map<std::string, sm_sendprop_info_ex_t>> propinfos;
+static std::unordered_map<ServerClass *, std::unordered_map<std::string, sm_sendprop_info_ex_t>> propinfos;
+
+bool Sample::remove_serverclass_from_cache(ServerClass *pClass) noexcept
+{
+	auto it_props{propinfos.find(pClass)};
+	if(it_props == propinfos.cend()) {
+		return false;
+	}
+
+	propinfos.erase(it_props);
+	return true;
+}
 
 static bool FindSendPropInfo(ServerClass *pClass, std::string &&name, sm_sendprop_info_ex_t *info) noexcept
 {
-	std::string sv_name{pClass->GetName()};
-	auto it_props{propinfos.find(sv_name)};
+	auto it_props{propinfos.find(pClass)};
 	if(it_props == propinfos.cend()) {
-		it_props = propinfos.emplace(std::pair<std::string, std::unordered_map<std::string, sm_sendprop_info_ex_t>>{std::move(sv_name), {}}).first;
+		it_props = propinfos.emplace(std::pair<ServerClass *, std::unordered_map<std::string, sm_sendprop_info_ex_t>>{pClass, {}}).first;
 	}
 	if(it_props != propinfos.cend()) {
 		auto it_prop{it_props->second.find(name)};

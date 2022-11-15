@@ -22,4 +22,5 @@ public:
 
 	virtual bool add_listener(const parallel_pack_listener *ptr) noexcept = 0;
 	virtual bool remove_listener(const parallel_pack_listener *ptr) noexcept = 0;
+	virtual bool remove_serverclass_from_cache(ServerClass *ptr) noexcept = 0;
 };

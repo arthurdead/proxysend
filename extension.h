@@ -52,6 +52,7 @@ public:
 
 	bool add_listener(const parallel_pack_listener *ptr) noexcept override final;
 	bool remove_listener(const parallel_pack_listener *ptr) noexcept override final;
+	bool remove_serverclass_from_cache(ServerClass *ptr) noexcept override final;
 
 	bool is_parallel_pack_allowed() const noexcept;
 
