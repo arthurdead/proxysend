@@ -38,6 +38,8 @@
 #include <iserverentity.h>
 #include <iservernetworkable.h>
 #include <server_class.h>
+#include <ehandle.h>
+#include <predictioncopy.h>
 #include <utility>
 #include <CDetour/detours.h>
 #include <memory>
@@ -48,6 +50,7 @@
 #include <mutex>
 #include <thread>
 #include <pthread.h>
+#include <ISDKTools.h>
 
 /**
  * @file extension.cpp
@@ -60,11 +63,23 @@ SMEXT_LINK(&g_Sample);
 
 static IGameConfig *gameconf{nullptr};
 static ISDKHooks *g_pSDKHooks{nullptr};
+ISDKTools *g_pSDKTools = nullptr;
+
+IServer *server = nullptr;
+CBaseEntityList *g_pEntityList = nullptr;
 
 static void *CGameClient_GetSendFrame_ptr{nullptr};
 
 static int CBaseClient_UpdateSendState_idx{-1};
 static int CBaseClient_SendSnapshot_idx{-1};
+
+template <typename T>
+int vfunc_index(T func)
+{
+	SourceHook::MemFuncInfo info{};
+	SourceHook::GetFuncInfo<T>(func, info);
+	return info.vtblindex;
+}
 
 template <typename R, typename T, typename ...Args>
 R call_mfunc(T *pThisPtr, void *offset, Args ...args)
@@ -127,24 +142,7 @@ class CBaseEntity : public IServerEntity
 {
 };
 
-enum prop_types : unsigned char
-{
-	int_,
-	short_,
-	char_,
-	unsigned_int,
-	unsigned_short,
-	unsigned_char,
-	float_,
-	vector,
-	qangle,
-	cstring,
-	ehandle,
-	bool_,
-	color32_,
-	tstring,
-	unknown
-};
+using prop_types = proxysend::prop_types;
 
 static void global_send_proxy(const SendProp *pProp, const void *pStructBase, const void *pData, DVariant *pOut, int iElement, int objectID);
 
@@ -168,163 +166,6 @@ static bool is_prop_cond(const SendProp *pProp)
 			pProp == m_nPlayerCondEx4);
 }
 #endif
-
-static prop_types guess_prop_type(const SendProp *pProp, const SendTable *pTable) noexcept
-{
-#if defined _DEBUG
-	printf("%s type is ", pProp->GetName());
-#endif
-
-	SendVarProxyFn pRealProxy{pProp->GetProxyFn()};
-	if(pRealProxy == global_send_proxy) {
-	#if defined _DEBUG
-		printf("invalid (global send proxy)\n");
-	#endif
-		return prop_types::unknown;
-	}
-
-#if SOURCE_ENGINE == SE_TF2
-	if(is_prop_cond(pProp)) {
-	#if defined _DEBUG
-		printf("unsigned int (is cond)\n");
-	#endif
-		return prop_types::unsigned_int;
-	}
-#endif
-
-	switch(pProp->GetType()) {
-		case DPT_Int: {
-			if(pProp->GetFlags() & SPROP_UNSIGNED) {
-				if(pRealProxy == std_proxies->m_UInt8ToInt32) {
-					if(pProp->m_nBits == 1) {
-					#if defined _DEBUG
-						printf("bool (bits == 1)\n");
-					#endif
-						return prop_types::bool_;
-					}
-
-				#if defined _DEBUG
-					printf("unsigned char (std proxy)\n");
-				#endif
-					return prop_types::unsigned_char;
-				} else if(pRealProxy == std_proxies->m_UInt16ToInt32) {
-				#if defined _DEBUG
-					printf("unsigned short (std proxy)\n");
-				#endif
-					return prop_types::unsigned_short;
-				} else if(pRealProxy == std_proxies->m_UInt32ToInt32) {
-					if(strcmp(pTable->GetName(), "DT_BaseEntity") == 0 && strcmp(pProp->GetName(), "m_clrRender") == 0) {
-					#if defined _DEBUG
-						printf("color32 (hardcode)\n");
-					#endif
-						return prop_types::color32_;
-					}
-
-				#if defined _DEBUG
-					printf("unsigned int (std proxy)\n");
-				#endif
-					return prop_types::unsigned_int;
-				} else {
-					{
-						if(pProp->m_nBits == 32) {
-							struct dummy_t {
-								unsigned int val{256};
-							} dummy;
-
-							DVariant out{};
-							pRealProxy(pProp, static_cast<const void *>(&dummy), static_cast<const void *>(&dummy.val), &out, 0, 0);
-							if(out.m_Int == 65536) {
-							#if defined _DEBUG
-								printf("color32 (proxy)\n");
-							#endif
-								return prop_types::color32_;
-							}
-						}
-					}
-
-					{
-						if(pProp->m_nBits == NUM_NETWORKED_EHANDLE_BITS) {
-							struct dummy_t {
-								CBaseHandle val{};
-							} dummy;
-
-							DVariant out{};
-							pRealProxy(pProp, static_cast<const void *>(&dummy), static_cast<const void *>(&dummy.val), &out, 0, 0);
-							if(out.m_Int == INVALID_NETWORKED_EHANDLE_VALUE) {
-							#if defined _DEBUG
-								printf("ehandle (proxy)\n");
-							#endif
-								return prop_types::ehandle;
-							}
-						}
-					}
-
-				#if defined _DEBUG
-					printf("unsigned int (flag)\n");
-				#endif
-					return prop_types::unsigned_int;
-				}
-			} else {
-				if(pRealProxy == std_proxies->m_Int8ToInt32) {
-				#if defined _DEBUG
-					printf("char (std proxy)\n");
-				#endif
-					return prop_types::char_;
-				} else if(pRealProxy == std_proxies->m_Int16ToInt32) {
-				#if defined _DEBUG
-					printf("short (std proxy)\n");
-				#endif
-					return prop_types::short_;
-				} else if(pRealProxy == std_proxies->m_Int32ToInt32) {
-				#if defined _DEBUG
-					printf("int (std proxy)\n");
-				#endif
-					return prop_types::int_;
-				} else {
-					{
-						struct dummy_t {
-							short val{SHRT_MAX-1};
-						} dummy;
-
-						DVariant out{};
-						pRealProxy(pProp, static_cast<const void *>(&dummy), static_cast<const void *>(&dummy.val), &out, 0, 0);
-						if(out.m_Int == dummy.val+1) {
-						#if defined _DEBUG
-							printf("short (proxy)\n");
-						#endif
-							return prop_types::short_;
-						}
-					}
-
-				#if defined _DEBUG
-					printf("int (type)\n");
-				#endif
-					return prop_types::int_;
-				}
-			}
-		}
-		case DPT_Float:
-		return prop_types::float_;
-		case DPT_Vector: {
-			if(pProp->m_fLowValue == 0.0f && pProp->m_fHighValue == 360.0f) {
-				return prop_types::qangle;
-			} else {
-				return prop_types::vector;
-			}
-		}
-		case DPT_VectorXY:
-		return prop_types::vector;
-		case DPT_String: {
-			return prop_types::cstring;
-		}
-		case DPT_Array:
-		return prop_types::unknown;
-		case DPT_DataTable:
-		return prop_types::unknown;
-	}
-
-	return prop_types::unknown;
-}
 
 struct proxyrestore_t final
 {
@@ -369,6 +210,179 @@ private:
 	proxyrestore_t &operator=(const proxyrestore_t &) = delete;
 	proxyrestore_t() = delete;
 };
+
+using restores_t = std::unordered_map<SendProp *, std::unique_ptr<proxyrestore_t>>;
+static restores_t restores;
+
+static prop_types guess_prop_type(const SendProp *pProp, const SendTable *pTable) noexcept
+{
+#if defined _DEBUG
+	printf("%s type is ", pProp->GetName());
+#endif
+
+	SendVarProxyFn pRealProxy{pProp->GetProxyFn()};
+	if(pRealProxy == global_send_proxy) {
+		restores_t::const_iterator it_restore{restores.find(const_cast<SendProp *>(pProp))};
+		if(it_restore == restores.cend()) {
+		#if defined _DEBUG
+			printf("invalid (global send proxy)\n");
+		#endif
+			return prop_types::unknown;
+		}
+
+	#if defined _DEBUG
+		printf("from restore (global send proxy)\n");
+	#endif
+		return it_restore->second->type;
+	}
+
+#if SOURCE_ENGINE == SE_TF2
+	if(is_prop_cond(pProp)) {
+	#if defined _DEBUG
+		printf("unsigned int (is cond)\n");
+	#endif
+		return prop_types::unsigned_int;
+	}
+#endif
+
+	switch(pProp->GetType()) {
+		case DPT_Int: {
+			if(pProp->GetFlags() & SPROP_UNSIGNED) {
+				if(pRealProxy == std_proxies->m_UInt8ToInt32) {
+					if(pProp->m_nBits == 1) {
+					#if defined _DEBUG
+						printf("bool (bits == 1)\n");
+					#endif
+						return prop_types::bool_;
+					}
+
+				#if defined _DEBUG
+					printf("unsigned char (std proxy)\n");
+				#endif
+					return prop_types::unsigned_char;
+				} else if(pRealProxy == std_proxies->m_UInt16ToInt32) {
+				#if defined _DEBUG
+					printf("unsigned short (std proxy)\n");
+				#endif
+					return prop_types::unsigned_short;
+				} else if(pRealProxy == std_proxies->m_UInt32ToInt32) {
+					if(pTable && strcmp(pTable->GetName(), "DT_BaseEntity") == 0 && strcmp(pProp->GetName(), "m_clrRender") == 0) {
+					#if defined _DEBUG
+						printf("color32 (hardcode)\n");
+					#endif
+						return prop_types::color32_;
+					}
+
+				#if defined _DEBUG
+					printf("unsigned int (std proxy)\n");
+				#endif
+					return prop_types::unsigned_int;
+				} else {
+					{
+						if(pProp->m_nBits == 32) {
+							struct dummy_t {
+								unsigned int val{256};
+							} dummy;
+
+							DVariant out{};
+							pRealProxy(pProp, static_cast<const void *>(&dummy), static_cast<const void *>(&dummy.val), &out, 0, -1);
+							if(out.m_Int == 65536) {
+							#if defined _DEBUG
+								printf("color32 (proxy)\n");
+							#endif
+								return prop_types::color32_;
+							}
+						}
+					}
+
+					{
+						if(pProp->m_nBits == NUM_NETWORKED_EHANDLE_BITS) {
+							struct dummy_t {
+								EHANDLE val{};
+							} dummy;
+
+							DVariant out{};
+							pRealProxy(pProp, static_cast<const void *>(&dummy), static_cast<const void *>(&dummy.val), &out, 0, -1);
+							if(out.m_Int == INVALID_NETWORKED_EHANDLE_VALUE) {
+							#if defined _DEBUG
+								printf("ehandle (proxy)\n");
+							#endif
+								return prop_types::ehandle;
+							}
+						}
+					}
+
+				#if defined _DEBUG
+					printf("unsigned int (flag)\n");
+				#endif
+					return prop_types::unsigned_int;
+				}
+			} else {
+				if(pRealProxy == std_proxies->m_Int8ToInt32) {
+				#if defined _DEBUG
+					printf("char (std proxy)\n");
+				#endif
+					return prop_types::char_;
+				} else if(pRealProxy == std_proxies->m_Int16ToInt32) {
+				#if defined _DEBUG
+					printf("short (std proxy)\n");
+				#endif
+					return prop_types::short_;
+				} else if(pRealProxy == std_proxies->m_Int32ToInt32) {
+				#if defined _DEBUG
+					printf("int (std proxy)\n");
+				#endif
+					return prop_types::int_;
+				} else {
+					{
+						struct dummy_t {
+							short val{SHRT_MAX-1};
+						} dummy;
+
+						DVariant out{};
+						pRealProxy(pProp, static_cast<const void *>(&dummy), static_cast<const void *>(&dummy.val), &out, 0, -1);
+						if(out.m_Int == dummy.val+1) {
+						#if defined _DEBUG
+							printf("short (proxy)\n");
+						#endif
+							return prop_types::short_;
+						}
+					}
+
+				#if defined _DEBUG
+					printf("int (type)\n");
+				#endif
+					return prop_types::int_;
+				}
+			}
+		}
+		case DPT_Float:
+		return prop_types::float_;
+		case DPT_Vector: {
+			if(pProp->m_fLowValue == 0.0f && pProp->m_fHighValue == 360.0f) {
+				return prop_types::qangle;
+			} else {
+				return prop_types::vector;
+			}
+		}
+		case DPT_VectorXY:
+		return prop_types::vector;
+		case DPT_String: {
+			return prop_types::cstring;
+		}
+		case DPT_Array:
+		return prop_types::unknown;
+		case DPT_DataTable:
+		return prop_types::unknown;
+	}
+
+	return prop_types::unknown;
+}
+
+proxysend::prop_types Sample::guess_prop_type(const SendProp *prop, const SendTable *table) const noexcept
+{
+	return ::guess_prop_type(prop, table);
+}
 
 template <typename T>
 class thread_var_base
@@ -628,19 +642,25 @@ struct packed_entity_data_t final
 	bf_write *writeBuf{nullptr};
 	int ref{INVALID_EHANDLE_INDEX};
 
+	bool allocated() const noexcept
+	{ return (packedData && writeBuf); }
+
+	bool written() const noexcept
+	{ return allocated() && (writeBuf->GetNumBitsWritten() > 0); }
+
 	packed_entity_data_t() noexcept = default;
 	~packed_entity_data_t() noexcept {
 		reset();
 	}
 
 	void reset() noexcept {
-		if(packedData) {
-			free(packedData);
-			packedData = nullptr;
-		}
 		if(writeBuf) {
 			delete writeBuf;
 			writeBuf = nullptr;
+		}
+		if(packedData) {
+			free(packedData);
+			packedData = nullptr;
 		}
 	}
 
@@ -679,6 +699,7 @@ private:
 
 static thread_var<bool> in_compute_packs;
 static thread_var<bool> do_calc_delta;
+static thread_var<bool> do_writedelta_entities;
 static thread_var<int> writedeltaentities_client;
 static thread_var<int> sendproxy_client_slot;
 
@@ -695,9 +716,6 @@ static void Host_Error(const char *error, ...) noexcept
 
 	Error("Host_Error: %s", string);
 }
-
-using restores_t = std::unordered_map<SendProp *, std::unique_ptr<proxyrestore_t>>;
-static restores_t restores;
 
 struct prop_reference_t
 {
@@ -948,23 +966,20 @@ struct callback_t final : prop_reference_t
 	{
 		fwd->PushCell(objectID);
 		fwd->PushStringEx((char *)name.c_str(), name.size()+1, SM_PARAM_STRING_COPY|SM_PARAM_STRING_UTF8, 0);
-		const CBaseHandle &hndl{*reinterpret_cast<const CBaseHandle *>(old_pData)};
-		cell_t sp_value{gamehelpers->ReferenceToBCompatRef(hndl.ToInt())};
+		const EHANDLE &hndl{*reinterpret_cast<const EHANDLE *>(old_pData)};
+		CBaseEntity *pEntity = hndl.Get();
+		cell_t sp_value{pEntity ? gamehelpers->EntityToBCompatRef(pEntity) : -1};
 		fwd->PushCellByRef(&sp_value);
 		fwd->PushCell(element);
 		fwd->PushCell(client);
 		cell_t res{Pl_Continue};
 		fwd->Execute(&res);
 		if(res == Pl_Changed) {
-			new_pData.emplace<CBaseHandle>(1);
-			CBaseHandle &new_value{new_pData.get<CBaseHandle>(0)};
-			new_value.Term();
-			CBaseEntity *pEntity = gamehelpers->ReferenceToEntity(sp_value);
+			new_pData.emplace<EHANDLE>(1);
+			EHANDLE &new_value{new_pData.get<EHANDLE>(0)};
+			pEntity = gamehelpers->ReferenceToEntity(sp_value);
 			if(pEntity) {
-				edict_t *edict{pEntity->GetNetworkable()->GetEdict()};
-				if(edict) {
-					gamehelpers->SetHandleEntity(new_value, edict);
-				}
+				new_value = pEntity->GetRefEHandle();
 			}
 			return true;
 		}
@@ -1283,6 +1298,7 @@ DETOUR_DECL_STATIC6(SendTable_Encode, bool, const SendTable *, pTable, const voi
 	}
 
 	{
+		sendproxy_client_slot = -1;
 		if(!DETOUR_STATIC_CALL(SendTable_Encode)(pTable, pStruct, pOut, objectID, pRecipients, bNonZeroOnly)) {
 			Host_Error( "SV_PackEntity: SendTable_Encode returned false (ent %d).\n", objectID );
 			return false;
@@ -1292,11 +1308,11 @@ DETOUR_DECL_STATIC6(SendTable_Encode, bool, const SendTable *, pTable, const voi
 	int ref{gamehelpers->IndexToReference(objectID)};
 
 	const std::vector<int> &entities{packentity_params->entities};
-
 	if(std::find(entities.cbegin(), entities.cend(), ref) != entities.cend()) {
 		const std::size_t slots_size{packentity_params->slots.size()};
 		for(int i{0}; i < slots_size; ++i) {
-			packed_entity_data_t &packedData{packentity_params->entity_data[i].emplace_back()};
+			std::vector<packed_entity_data_t> &vec{packentity_params->entity_data[i]};
+			packed_entity_data_t &packedData{vec.emplace_back()};
 
 			packedData.ref = ref;
 			packedData.allocate();
@@ -1309,9 +1325,7 @@ DETOUR_DECL_STATIC6(SendTable_Encode, bool, const SendTable *, pTable, const voi
 				return false;
 			}
 		}
-		if(slots_size > 0) {
-			do_calc_delta = true;
-		}
+		do_calc_delta = true;
 	}
 
 	return true;
@@ -1326,33 +1340,46 @@ DETOUR_DECL_STATIC8(SendTable_CalcDelta, int, const SendTable *, pTable, const v
 	do_calc_delta = false;
 
 	int global_nChanges{DETOUR_STATIC_CALL(SendTable_CalcDelta)(pTable, pFromState, nFromBits, pToState, nToBits, pDeltaProps, nMaxDeltaProps, objectID)};
+	int total_nChanges{global_nChanges};
 
-	if(global_nChanges < nMaxDeltaProps) {
-		int *client_deltaProps{new int[nMaxDeltaProps]{static_cast<unsigned int>(-1)}};
+	if(total_nChanges < nMaxDeltaProps) {
+		int *client_deltaProps{new int[nMaxDeltaProps]};
 
-		for(int i{0}; i < packentity_params->slots.size(); ++i) {
+		int new_nChanges{total_nChanges};
+
+		const std::size_t slots_size{packentity_params->slots.size()};
+		for(int i{0}; i < slots_size; ++i) {
 			std::vector<packed_entity_data_t> &entity_data{packentity_params->entity_data[i]};
-			if(entity_data.size() == 0) {
+
+			packed_entity_data_t *packedData{nullptr};
+			for(auto it{entity_data.rbegin()}; it != entity_data.rend(); ++it) {
+				if(it->ref == gamehelpers->IndexToReference(objectID)) {
+					packedData = &*it;
+					break;
+				}
+			}
+
+			if(!packedData || !packedData->written()) {
 				continue;
 			}
 
-			packed_entity_data_t &packedData{entity_data.back()};
-
-			const int client_nChanges{DETOUR_STATIC_CALL(SendTable_CalcDelta)(pTable, pFromState, nFromBits, packedData.packedData, packedData.writeBuf->GetNumBitsWritten(), client_deltaProps, nMaxDeltaProps, objectID)};
+			const int client_nChanges{DETOUR_STATIC_CALL(SendTable_CalcDelta)(pTable, pFromState, nFromBits, packedData->packedData, packedData->writeBuf->GetNumBitsWritten(), client_deltaProps, nMaxDeltaProps, objectID)};
+			int client_nChanges_new{0};
 
 			bool done{false};
 
 			for(int j{0}; j < client_nChanges; ++j) {
 				bool found{false};
-				for(int k{0}; k < global_nChanges; ++k) {
+				for(int k{0}; k < new_nChanges; ++k) {
 					if(pDeltaProps[k] == client_deltaProps[j]) {
 						found = true;
 						break;
 					}
 				}
 				if(!found) {
-					pDeltaProps[global_nChanges++] = client_deltaProps[j];
-					if(global_nChanges >= nMaxDeltaProps) {
+					++client_nChanges_new;
+					pDeltaProps[total_nChanges++] = client_deltaProps[j];
+					if(total_nChanges >= nMaxDeltaProps) {
 						done = true;
 						break;
 					}
@@ -1362,16 +1389,18 @@ DETOUR_DECL_STATIC8(SendTable_CalcDelta, int, const SendTable *, pTable, const v
 			if(done) {
 				break;
 			}
+
+			new_nChanges += client_nChanges_new;
 		}
 
 		delete[] client_deltaProps;
 	}
 
-	if(global_nChanges > nMaxDeltaProps) {
-		global_nChanges = nMaxDeltaProps;
+	if(total_nChanges > nMaxDeltaProps) {
+		total_nChanges = nMaxDeltaProps;
 	}
 
-	return global_nChanges;
+	return total_nChanges;
 }
 
 class CFrameSnapshot
@@ -1421,12 +1450,15 @@ DETOUR_DECL_MEMBER2(CFrameSnapshotManager_GetPackedEntity, PackedEntity *, CFram
 	int ref{gamehelpers->IndexToReference(entity)};
 
 	const packed_entity_data_t *packedData{nullptr};
-	for(int i{0}; i < packentity_params->slots.size(); ++i) {
+	const std::size_t slots_size{packentity_params->slots.size()};
+	for(int i{0}; i < slots_size; ++i) {
 		if(packentity_params->slots[i] == slot) {
 			const std::vector<packed_entity_data_t> &entity_data{packentity_params->entity_data[i]};
 			for(const packed_entity_data_t &it : entity_data) {
 				if(it.ref == ref) {
-					packedData = &it;
+					if(it.written()) {
+						packedData = &it;
+					}
 					break;
 				}
 			}
@@ -1466,16 +1498,51 @@ static bool is_client_valid(CBaseClient *client) noexcept
 	return true;
 }
 
+#include <iserver.h>
+
+class CBaseServer : public IServer
+{
+public:
+	virtual float	GetCPUUsage( void ) = 0;
+	virtual void	BroadcastPrintf ( PRINTF_FORMAT_STRING const char *fmt, ...) = 0;
+	virtual void	SetMaxClients( int number ) = 0;
+	virtual void	WriteDeltaEntities( CBaseClient *client, CClientFrame *to, CClientFrame *from,	bf_write &pBuf ) = 0;
+};
+
+void PreWriteDeltaEntities(CBaseClient *client)
+{
+	if(do_writedelta_entities) {
+		if(!is_client_valid(client)) {
+			writedeltaentities_client = -1;
+		} else {
+			writedeltaentities_client = client->GetPlayerSlot();
+		}
+	}
+
+	for(auto it : g_Sample.pack_ent_listeners) {
+		it->pre_write_deltas();
+	}
+}
+
+void PostWriteDeltaEntities()
+{
+	for(auto it : g_Sample.pack_ent_listeners) {
+		it->post_write_deltas();
+	}
+
+	if(do_writedelta_entities) {
+		writedeltaentities_client = -1;
+	}
+}
+
 DETOUR_DECL_MEMBER4(CBaseServer_WriteDeltaEntities, void, CBaseClient *, client, CClientFrame *, to, CClientFrame *, from, bf_write &, pBuf)
 {
-	if(!is_client_valid(client)) {
-		writedeltaentities_client = -1;
-	} else {
-		writedeltaentities_client = client->GetPlayerSlot();
-	}
+	PreWriteDeltaEntities(client);
 	DETOUR_MEMBER_CALL(CBaseServer_WriteDeltaEntities)(client, to, from, pBuf);
-	writedeltaentities_client = -1;
+	PostWriteDeltaEntities();
 }
+
+static CDetour *CBaseServer_WriteDeltaEntities_detour{nullptr};
 
 static ConVar *sv_parallel_packentities{nullptr};
 static ConVar *sv_parallel_sendsnapshot{nullptr};
@@ -1502,7 +1569,6 @@ DETOUR_DECL_STATIC4(SV_PackEntity, void, int, edictIdx, edict_t *, edict, Server
 static CDetour *SendTable_CalcDelta_detour{nullptr};
 static CDetour *SendTable_Encode_detour{nullptr};
 static CDetour *CFrameSnapshotManager_GetPackedEntity_detour{nullptr};
-static CDetour *CBaseServer_WriteDeltaEntities_detour{nullptr};
 
 DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient **, clients, CFrameSnapshot *, snapshot)
 {
@@ -1517,6 +1583,7 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 		}
 		slots.emplace_back(client->GetPlayerSlot());
 	}
+	const std::size_t slots_size{slots.size()};
 
 	std::vector<int> entities{};
 
@@ -1540,7 +1607,7 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 			if(!it_hook->second.callbacks.empty()) {
 				any_hook = true;
 			}
-			if(slots.size() > 0) {
+			if(slots_size > 0) {
 				bool any_per_client_func{false};
 				for(const auto &it_callback : it_hook->second.callbacks) {
 					if(it_callback.second.has_any_per_client_func()) {
@@ -1555,7 +1622,7 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 		}
 	}
 
-	const bool any_per_client_hook{slots.size() > 0 && entities.size() > 0};
+	const bool any_per_client_hook{slots_size > 0 && entities.size() > 0};
 
 #if defined _DEBUG && 0
 	printf("slots = %i, entities = %i\n", slots.size(), entities.size());
@@ -1566,10 +1633,10 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 		packentity_params.reset(new pack_entity_params_t{std::move(slots), std::move(entities), snapshot->m_ListIndex});
 		SendTable_Encode_detour->EnableDetour();
 		SendTable_CalcDelta_detour->EnableDetour();
-		CBaseServer_WriteDeltaEntities_detour->EnableDetour();
 		CFrameSnapshotManager_GetPackedEntity_detour->EnableDetour();
+		do_writedelta_entities = true;
 	} else {
-		CBaseServer_WriteDeltaEntities_detour->DisableDetour();
+		do_writedelta_entities = false;
 		CFrameSnapshotManager_GetPackedEntity_detour->DisableDetour();
 		SendTable_Encode_detour->DisableDetour();
 		SendTable_CalcDelta_detour->DisableDetour();
@@ -1627,20 +1694,22 @@ static void global_send_proxy(const SendProp *pProp, const void *pStructBase, co
 {
 	proxyrestore_t *restore{nullptr};
 
-	const hooks_t &chooks{hooks};
-	int ref{gamehelpers->IndexToReference(objectID)};
-	hooks_t::const_iterator it_hook{chooks.find(ref)};
-	if(it_hook != chooks.cend()) {
-		callbacks_t::const_iterator it_callback{it_hook->second.callbacks.find(pProp)};
-		if(it_callback != it_hook->second.callbacks.cend()) {
-			restore = it_callback->second.restore;
-			const int client{callback_t::get_current_client_entity()};
-			if(it_callback->second.can_call_fwd(client)) {
-				if(std::this_thread::get_id() == main_thread_id) {
-					opaque_ptr new_data{};
-					if(it_callback->second.fwd_call(client, pProp, pData, new_data, objectID)) {
-						it_callback->second.proxy_call(pProp, pStructBase, pData, new_data.get(), pOut, iElement, objectID);
-						return;
+	if(objectID != -1) {
+		const hooks_t &chooks{hooks};
+		int ref{gamehelpers->IndexToReference(objectID)};
+		hooks_t::const_iterator it_hook{chooks.find(ref)};
+		if(it_hook != chooks.cend()) {
+			callbacks_t::const_iterator it_callback{it_hook->second.callbacks.find(pProp)};
+			if(it_callback != it_hook->second.callbacks.cend()) {
+				restore = it_callback->second.restore;
+				const int client{callback_t::get_current_client_entity()};
+				if(it_callback->second.can_call_fwd(client)) {
+					if(std::this_thread::get_id() == main_thread_id) {
+						opaque_ptr new_data{};
+						if(it_callback->second.fwd_call(client, pProp, pData, new_data, objectID)) {
+							it_callback->second.proxy_call(pProp, pStructBase, pData, new_data.get(), pOut, iElement, objectID);
+							return;
+						}
 					}
 				}
 			}
@@ -1674,7 +1743,7 @@ DETOUR_DECL_MEMBER1(CGameServer_SendClientMessages, void, bool, bSendSnapshots)
 	DETOUR_MEMBER_CALL(CGameServer_SendClientMessages)(bSendSnapshots);
 
 	if(!sv_parallel_sendsnapshot->GetBool()) {
-		CBaseServer_WriteDeltaEntities_detour->DisableDetour();
+		do_writedelta_entities = false;
 		CFrameSnapshotManager_GetPackedEntity_detour->DisableDetour();
 	}
 
@@ -1988,11 +2057,14 @@ bool Sample::SDK_OnLoad(char *error, size_t maxlen, bool late) noexcept
 		return false;
 	}
 
-	CBaseServer_WriteDeltaEntities_detour = DETOUR_CREATE_MEMBER(CBaseServer_WriteDeltaEntities, "CBaseServer::WriteDeltaEntities");
-	if(!CBaseServer_WriteDeltaEntities_detour) {
-		snprintf(error, maxlen, "could not create CBaseServer::WriteDeltaEntities detour");
-		return false;
+#if SOURCE_ENGINE == SE_TF2
+	{
+		void **vtable = *(void ***)server;
+		int index = vfunc_index(&CBaseServer::WriteDeltaEntities);
+		CBaseServer_WriteDeltaEntities_detour = DETOUR_CREATE_MEMBER(CBaseServer_WriteDeltaEntities, vtable[index]);
+		CBaseServer_WriteDeltaEntities_detour->EnableDetour();
 	}
+#endif
 
 #if 0
 	//SV_PackEntity_detour = DETOUR_CREATE_STATIC(SV_PackEntity, "SV_PackEntity");
@@ -2007,6 +2079,8 @@ bool Sample::SDK_OnLoad(char *error, size_t maxlen, bool late) noexcept
 
 	CGameServer_SendClientMessages_detour->EnableDetour();
 	SV_ComputeClientPacks_detour->EnableDetour();
+
+	g_pEntityList = reinterpret_cast<CBaseEntityList *>(gamehelpers->GetGlobalEntityList());
 
 	sharesys->AddDependency(myself, "sdkhooks.ext", true, true);
 
@@ -2047,6 +2121,10 @@ bool Sample::SDK_OnMetamodLoad(ISmmAPI *ismm, char *error, size_t maxlen, bool l
 {
 	GET_V_IFACE_ANY(GetEngineFactory, g_pCVar, ICvar, CVAR_INTERFACE_VERSION);
 	ConVar_Register(0, this);
+
+#if SOURCE_ENGINE == SE_TF2
+	server = engine->GetIServer();
+#endif
 
 	std_proxies = gamedll->GetStandardSendProxies();
 
@@ -2126,6 +2204,7 @@ void Sample::OnPluginUnloaded(IPlugin *plugin) noexcept
 bool Sample::QueryRunning(char *error, size_t maxlength)
 {
 	SM_CHECK_IFACE(SDKHOOKS, g_pSDKHooks);
+	SM_CHECK_IFACE(SDKTOOLS, g_pSDKTools);
 	return true;
 }
 
@@ -2133,21 +2212,36 @@ bool Sample::QueryInterfaceDrop(SMInterface *pInterface)
 {
 	if(pInterface == g_pSDKHooks)
 		return false;
+	else if(pInterface == g_pSDKTools)
+		return false;
 	return IExtensionInterface::QueryInterfaceDrop(pInterface);
 }
 
 void Sample::NotifyInterfaceDrop(SMInterface *pInterface)
 {
-	if(strcmp(pInterface->GetInterfaceName(), SMINTERFACE_SDKHOOKS_NAME) == 0)
-	{
+	if(strcmp(pInterface->GetInterfaceName(), SMINTERFACE_SDKHOOKS_NAME) == 0) {
 		g_pSDKHooks->RemoveEntityListener(this);
 		g_pSDKHooks = NULL;
+	} else if(strcmp(pInterface->GetInterfaceName(), SMINTERFACE_SDKTOOLS_NAME) == 0) {
+		g_pSDKTools = NULL;
 	}
 }
 
 void Sample::SDK_OnAllLoaded() noexcept
 {
 	SM_GET_LATE_IFACE(SDKHOOKS, g_pSDKHooks);
+	SM_GET_LATE_IFACE(SDKTOOLS, g_pSDKTools);
 
 	g_pSDKHooks->AddEntityListener(this);
+
+#if SOURCE_ENGINE == SE_LEFT4DEAD2
+	server = g_pSDKTools->GetIServer();
+
+	{
+		void **vtable = *(void ***)server;
+		int index = vfunc_index(&CBaseServer::WriteDeltaEntities);
+		CBaseServer_WriteDeltaEntities_detour = DETOUR_CREATE_MEMBER(CBaseServer_WriteDeltaEntities, vtable[index]);
+		CBaseServer_WriteDeltaEntities_detour->EnableDetour();
+	}
+#endif
 }
