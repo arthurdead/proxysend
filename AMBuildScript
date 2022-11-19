@@ -173,13 +173,11 @@ class ExtensionConfig(object):
       '-Wno-unused',
       '-Wno-switch',
       '-Wno-array-bounds',
-      '-Wno-register',
       '-msse',
       '-m32',
       '-fvisibility=hidden',
     ]
     cxx.cxxflags += [
-      '-std=gnu++2a',
       '-fno-exceptions',
       '-fno-threadsafe-statics',
       '-Wno-non-virtual-dtor',
@@ -187,6 +185,11 @@ class ExtensionConfig(object):
       '-fvisibility-inlines-hidden',
     ]
     cxx.linkflags += ['-m32']
+
+    if cxx.version >= 'clang-5':
+      cxx.cxxflags += ['-Wno-register','-std=c++17']
+    else:
+      cxx.cxxflags += ['-std=c++14']
 
     have_gcc = cxx.vendor == 'gcc'
     have_clang = cxx.vendor == 'clang'

@@ -388,7 +388,7 @@ template <typename T>
 class thread_var_base
 {
 protected:
-	using ptr_ret_t = std::conditional_t<std::is_pointer_v<T>, T, T *>;
+	using ptr_ret_t = std::conditional_t<std::is_pointer<T>::value, T, T *>;
 
 public:
 	inline void reset(std::nullptr_t) noexcept
@@ -405,7 +405,9 @@ public:
 	{
 	}
 
-	thread_var_base() noexcept = default;
+	inline thread_var_base() noexcept
+	{
+	}
 
 	inline bool operator!() const noexcept;
 
@@ -442,9 +444,12 @@ protected:
 		if(!ptr) {
 			return nullptr;
 		}
+	#if 0
 		if constexpr(std::is_pointer_v<T>) {
 			return *ptr;
-		} else {
+		} else
+	#endif
+		{
 			return ptr;
 		}
 	}
@@ -532,6 +537,11 @@ public:
 		return *ptr;
 	}
 
+	inline thread_var() noexcept
+		: thread_var_base<T>{}
+	{
+	}
+
 	inline thread_var(const T &val) noexcept
 	{ *this->get_or_allocate_ptr() = val; }
 
@@ -583,6 +593,11 @@ class thread_var<bool> final : public thread_var_base<bool>
 public:
 	using thread_var_base<bool>::thread_var_base;
 	using thread_var_base<bool>::reset;
+
+	inline thread_var()
+		: thread_var_base<bool>{}
+	{
+	}
 
 	inline bool operator*() const noexcept
 	{ return get(); }
@@ -723,7 +738,8 @@ struct prop_reference_t
 	{
 		restores_t::iterator it_restore{restores.find(pProp)};
 		if(it_restore == restores.end()) {
-			it_restore = restores.emplace(std::pair<SendProp *, std::unique_ptr<proxyrestore_t>>{pProp, new proxyrestore_t{pProp, type}}).first;
+			std::unique_ptr<proxyrestore_t> ptr{new proxyrestore_t{pProp, type}};
+			it_restore = restores.emplace(std::pair<SendProp *, std::unique_ptr<proxyrestore_t>>{pProp, std::move(ptr)}).first;
 		}
 		restore = it_restore->second.get();
 		++restore->ref;
@@ -1312,7 +1328,8 @@ DETOUR_DECL_STATIC6(SendTable_Encode, bool, const SendTable *, pTable, const voi
 		const std::size_t slots_size{packentity_params->slots.size()};
 		for(int i{0}; i < slots_size; ++i) {
 			std::vector<packed_entity_data_t> &vec{packentity_params->entity_data[i]};
-			packed_entity_data_t &packedData{vec.emplace_back()};
+			vec.emplace_back();
+			packed_entity_data_t &packedData{vec.back()};
 
 			packedData.ref = ref;
 			packedData.allocate();
@@ -1349,10 +1366,11 @@ DETOUR_DECL_STATIC8(SendTable_CalcDelta, int, const SendTable *, pTable, const v
 
 		const std::size_t slots_size{packentity_params->slots.size()};
 		for(int i{0}; i < slots_size; ++i) {
-			std::vector<packed_entity_data_t> &entity_data{packentity_params->entity_data[i]};
+			using entity_data_t = std::vector<packed_entity_data_t>;
+			entity_data_t &entity_data{packentity_params->entity_data[i]};
 
 			packed_entity_data_t *packedData{nullptr};
-			for(auto it{entity_data.rbegin()}; it != entity_data.rend(); ++it) {
+			for(entity_data_t::reverse_iterator it{entity_data.rbegin()}; it != entity_data.rend(); ++it) {
 				if(it->ref == gamehelpers->IndexToReference(objectID)) {
 					packedData = &*it;
 					break;
@@ -1681,7 +1699,7 @@ bool Sample::add_listener(const parallel_pack_listener *ptr) noexcept
 
 bool Sample::remove_listener(const parallel_pack_listener *ptr) noexcept
 {
-	auto it{std::find(pack_ent_listeners.cbegin(), pack_ent_listeners.cend(), ptr)};
+	pack_ent_listeners_t::const_iterator it{std::find(pack_ent_listeners.cbegin(), pack_ent_listeners.cend(), ptr)};
 	if(it == pack_ent_listeners.cend()) {
 		return false;
 	}
@@ -1812,11 +1830,13 @@ static bool UTIL_FindInSendTable(SendTable *pTable,
 	return false;
 }
 
-static std::unordered_map<ServerClass *, std::unordered_map<std::string, sm_sendprop_info_ex_t>> propinfos;
+using propinfo_t = std::unordered_map<std::string, sm_sendprop_info_ex_t>;
+using propinfos_t = std::unordered_map<ServerClass *, propinfo_t>;
+static propinfos_t propinfos;
 
 bool Sample::remove_serverclass_from_cache(ServerClass *pClass) noexcept
 {
-	auto it_props{propinfos.find(pClass)};
+	propinfos_t::iterator it_props{propinfos.find(pClass)};
 	if(it_props == propinfos.cend()) {
 		return false;
 	}
@@ -1827,12 +1847,12 @@ bool Sample::remove_serverclass_from_cache(ServerClass *pClass) noexcept
 
 static bool FindSendPropInfo(ServerClass *pClass, std::string &&name, sm_sendprop_info_ex_t *info) noexcept
 {
-	auto it_props{propinfos.find(pClass)};
+	propinfos_t::iterator it_props{propinfos.find(pClass)};
 	if(it_props == propinfos.cend()) {
-		it_props = propinfos.emplace(std::pair<ServerClass *, std::unordered_map<std::string, sm_sendprop_info_ex_t>>{pClass, {}}).first;
+		it_props = propinfos.emplace(std::pair<ServerClass *, propinfo_t>{pClass, propinfo_t{}}).first;
 	}
 	if(it_props != propinfos.cend()) {
-		auto it_prop{it_props->second.find(name)};
+		propinfo_t::iterator it_prop{it_props->second.find(name)};
 		if(it_prop == it_props->second.cend()) {
 			if(UTIL_FindInSendTable(pClass->m_pTable, name.c_str(), info, 0)) {
 				it_prop = it_props->second.emplace(std::pair<std::string, sm_sendprop_info_ex_t>{std::move(name), std::move(*info)}).first;

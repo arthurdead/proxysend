@@ -48,7 +48,8 @@
 class Sample final : public SDKExtension, public IPluginsListener, public ISMEntityListener, public IConCommandBaseAccessor, public proxysend
 {
 public:
-	std::vector<const parallel_pack_listener *> pack_ent_listeners;
+	using pack_ent_listeners_t = std::vector<const parallel_pack_listener *>;
+	pack_ent_listeners_t pack_ent_listeners;
 
 	bool add_listener(const parallel_pack_listener *ptr) noexcept override final;
 	bool remove_listener(const parallel_pack_listener *ptr) noexcept override final;
