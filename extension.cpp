@@ -1364,6 +1364,8 @@ DETOUR_DECL_STATIC8(SendTable_CalcDelta, int, const SendTable *, pTable, const v
 
 		int new_nChanges{total_nChanges};
 
+		int ref = gamehelpers->IndexToReference(objectID);
+
 		const std::size_t slots_size{packentity_params->slots.size()};
 		for(int i{0}; i < slots_size; ++i) {
 			using entity_data_t = std::vector<packed_entity_data_t>;
@@ -1371,8 +1373,8 @@ DETOUR_DECL_STATIC8(SendTable_CalcDelta, int, const SendTable *, pTable, const v
 
 			packed_entity_data_t *packedData{nullptr};
 			for(entity_data_t::reverse_iterator it{entity_data.rbegin()}; it != entity_data.rend(); ++it) {
-				if(it->ref == gamehelpers->IndexToReference(objectID)) {
-					packedData = &*it;
+				if(it->ref == ref) {
+					packedData = &(*it);
 					break;
 				}
 			}
