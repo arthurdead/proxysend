@@ -214,6 +214,10 @@ private:
 using restores_t = std::unordered_map<SendProp *, std::unique_ptr<proxyrestore_t>>;
 static restores_t restores;
 
+static SendVarProxyFn SendProxy_StringT_To_String_ptr{nullptr};
+static SendVarProxyFn SendProxy_Color32ToInt_ptr{nullptr};
+static SendVarProxyFn SendProxy_EHandleToInt_ptr{nullptr};
+
 static prop_types guess_prop_type(const SendProp *pProp, const SendTable *pTable) noexcept
 {
 #if defined _DEBUG
@@ -278,6 +282,12 @@ static prop_types guess_prop_type(const SendProp *pProp, const SendTable *pTable
 				#endif
 					return prop_types::unsigned_int;
 				} else {
+					if(SendProxy_Color32ToInt_ptr && pRealProxy == SendProxy_Color32ToInt_ptr) {
+						return prop_types::color32_;
+					} else if(SendProxy_EHandleToInt_ptr && pRealProxy == SendProxy_EHandleToInt_ptr) {
+						return prop_types::ehandle;
+					}
+
 					{
 						if(pProp->m_nBits == 32) {
 							struct dummy_t {
@@ -368,7 +378,11 @@ static prop_types guess_prop_type(const SendProp *pProp, const SendTable *pTable
 		case DPT_VectorXY:
 		return prop_types::vector;
 		case DPT_String: {
-			return prop_types::cstring;
+			if(SendProxy_StringT_To_String_ptr && pRealProxy == SendProxy_StringT_To_String_ptr) {
+				return prop_types::tstring;
+			} else {
+				return prop_types::cstring;
+			}
 		}
 		case DPT_Array:
 		return prop_types::unknown;
@@ -1667,7 +1681,7 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 		g_Sample.is_parallel_pack_allowed()
 	};
 
-	sv_parallel_sendsnapshot->SetValue(true);
+	//sv_parallel_sendsnapshot->SetValue(false);
 	sv_parallel_packentities->SetValue(parallel_pack);
 
 	in_compute_packs = true;
@@ -1924,21 +1938,34 @@ static cell_t proxysend_hook(IPluginContext *pContext, const cell_t *params) noe
 		it_hook = hooks.emplace(std::pair<int, proxyhook_t>{ref, proxyhook_t{ref}}).first;
 	}
 
+	edict_t *edict{pEntity->GetNetworkable()->GetEdict()};
+
 	if(pProp->GetType() == DPT_DataTable) {
 		SendTable *pPropTable{pProp->GetDataTable()};
 		int NumProps{pPropTable->GetNumProps()};
 		for(int i = 0; i < NumProps; ++i) {
 			SendProp *pChildProp{pPropTable->GetProp(i)};
 			std::string tmp_name{prop_name};
-			cell_t ret{proxysend_handle_hook(pContext, it_hook, ref, info.actual_offset + pChildProp->GetOffset(), pChildProp, std::move(tmp_name), i, pTable, callback, per_client)};
+			int offset{info.actual_offset + pChildProp->GetOffset()};
+			cell_t ret{proxysend_handle_hook(pContext, it_hook, ref, offset, pChildProp, std::move(tmp_name), i, pTable, callback, per_client)};
 			if(ret != 0) {
 				return ret;
+			}
+			if(edict) {
+				gamehelpers->SetEdictStateChanged(edict, offset);
 			}
 		}
 		return 0;
 	}
 
-	return proxysend_handle_hook(pContext, it_hook, ref, info.actual_offset, pProp, std::move(prop_name), 0, pTable, callback, per_client);
+	cell_t ret{proxysend_handle_hook(pContext, it_hook, ref, info.actual_offset, pProp, std::move(prop_name), 0, pTable, callback, per_client)};
+	if(ret == 0) {
+		if(edict) {
+			gamehelpers->SetEdictStateChanged(edict, info.actual_offset);
+		}
+	}
+
+	return ret;
 }
 
 static void proxysend_handle_unhook(hooks_t::iterator it_hook, int ref, const SendProp *pProp, const char *name, IPluginFunction *callback)
@@ -1999,6 +2026,11 @@ static cell_t proxysend_unhook(IPluginContext *pContext, const cell_t *params) n
 		}
 	}
 
+	edict_t *edict{pEntity->GetNetworkable()->GetEdict()};
+	if(edict) {
+		gamehelpers->SetEdictStateChanged(edict, 0);
+	}
+
 	return 0;
 }
 
@@ -2046,6 +2078,15 @@ bool Sample::SDK_OnLoad(char *error, size_t maxlen, bool late) noexcept
 		snprintf(error, maxlen, "could not get CGameClient::GetSendFrame address");
 		return false;
 	}
+
+	gameconf->GetMemSig("SendProxy_StringT_To_String", (void **)&SendProxy_StringT_To_String_ptr);
+	if(SendProxy_StringT_To_String_ptr == nullptr) {
+		snprintf(error, maxlen, "could not get SendProxy_StringT_To_String address");
+		return false;
+	}
+
+	gameconf->GetMemSig("SendProxy_Color32ToInt", (void **)&SendProxy_Color32ToInt_ptr);
+	gameconf->GetMemSig("SendProxy_EHandleToInt", (void **)&SendProxy_EHandleToInt_ptr);
 
 	CDetourManager::Init(smutils->GetScriptingEngine(), gameconf);
 

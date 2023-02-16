@@ -60,6 +60,21 @@
 				"library" "engine"
 				"linux" "@_ZN10PackWork_t7ProcessERS_"
 			}
+			"SendProxy_StringT_To_String"
+			{
+				"library" "server"
+				"linux" "@_Z27SendProxy_StringT_To_StringPK8SendPropPKvS3_P8DVariantii"
+			}
+			"SendProxy_Color32ToInt"
+			{
+				"library" "server"
+				"linux" "@_Z22SendProxy_Color32ToIntPK8SendPropPKvS3_P8DVariantii"
+			}
+			"SendProxy_EHandleToInt"
+			{
+				"library" "server"
+				"linux" "@_Z22SendProxy_EHandleToIntPK8SendPropPKvS3_P8DVariantii"
+			}
 		}
 	}
 }
