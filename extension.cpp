@@ -1773,6 +1773,7 @@ static void game_frame(bool simulating) noexcept
 	// dumb nonsense so clients are fully aware that our hooked edicts are changing.
 	// this looks hacky, and it is, but there is not a better way i could find
 	// after tearing my hair out for 3 days of research
+	// sappho.io
 	for (auto& hook : hooks)
 	{
 		int ref = hook.first; // hook.second.ref;
