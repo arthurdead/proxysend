@@ -28,7 +28,6 @@
  *
  * Version: $Id$
  */
-
 #include <algorithm>
 #include "extension.h"
 #include <dt_send.h>
@@ -697,6 +696,7 @@ struct packed_entity_data_t final
 		reset();
 
 		packedData = static_cast<char *>(aligned_alloc(4, MAX_PACKEDENTITY_DATA));
+		memset(packedData, 0x0, MAX_PACKEDENTITY_DATA);
 		writeBuf = new bf_write{"SV_PackEntity->writeBuf", packedData, MAX_PACKEDENTITY_DATA};
 	}
 
@@ -726,13 +726,13 @@ private:
 	pack_entity_params_t &operator=(pack_entity_params_t &&) = delete;
 };
 
-static thread_var<bool> in_compute_packs;
-static thread_var<bool> do_calc_delta;
-static thread_var<bool> do_writedelta_entities;
-static thread_var<int> writedeltaentities_client;
-static thread_var<int> sendproxy_client_slot;
+static thread_var<bool> in_compute_packs{};
+static thread_var<bool> do_calc_delta{};
+static thread_var<bool> do_writedelta_entities{};
+static thread_var<int> writedeltaentities_client{};
+static thread_var<int> sendproxy_client_slot{};
 
-static std::unique_ptr<pack_entity_params_t> packentity_params;
+static std::unique_ptr<pack_entity_params_t> packentity_params{};
 
 static void Host_Error(const char *error, ...) noexcept
 {
@@ -808,7 +808,7 @@ struct opaque_ptr final
 
 	template <typename T>
 	static void del_hlpr(void *ptr_) noexcept
-	{ delete[] static_cast<T *>(ptr_); }
+	{ delete static_cast<T *>(ptr_); }
 
 	opaque_ptr() = default;
 
@@ -907,7 +907,7 @@ struct callback_t final : prop_reference_t
 
 	void change_edict_state() noexcept
 	{
-		if(ref != INVALID_EHANDLE_INDEX) {
+		if(ref != (int)INVALID_EHANDLE_INDEX) {
 			CBaseEntity *pEntity{gamehelpers->ReferenceToEntity(ref)};
 			edict_t *edict{pEntity->GetNetworkable()->GetEdict()};
 			if(edict) {
@@ -1126,7 +1126,8 @@ struct callback_t final : prop_reference_t
 		if(res == Pl_Changed) {
 			new_pData.emplace<char>(strlen(sp_value)+1);
 			char *new_value{new_pData.get<char>()};
-			strcpy(new_value, new_value);
+			// ????????
+			// strcpy(new_value, new_value);
 			return true;
 		}
 		return false;
@@ -1340,7 +1341,7 @@ DETOUR_DECL_STATIC6(SendTable_Encode, bool, const SendTable *, pTable, const voi
 	const std::vector<int> &entities{packentity_params->entities};
 	if(std::find(entities.cbegin(), entities.cend(), ref) != entities.cend()) {
 		const std::size_t slots_size{packentity_params->slots.size()};
-		for(int i{0}; i < slots_size; ++i) {
+		for(std::size_t i{0}; i < slots_size; ++i) {
 			std::vector<packed_entity_data_t> &vec{packentity_params->entity_data[i]};
 			vec.emplace_back();
 			packed_entity_data_t &packedData{vec.back()};
@@ -1374,14 +1375,14 @@ DETOUR_DECL_STATIC8(SendTable_CalcDelta, int, const SendTable *, pTable, const v
 	int total_nChanges{global_nChanges};
 
 	if(total_nChanges < nMaxDeltaProps) {
-		int *client_deltaProps{new int[nMaxDeltaProps]};
+		int *client_deltaProps{new int[nMaxDeltaProps]{}};
 
 		int new_nChanges{total_nChanges};
 
 		int ref = gamehelpers->IndexToReference(objectID);
 
 		const std::size_t slots_size{packentity_params->slots.size()};
-		for(int i{0}; i < slots_size; ++i) {
+		for(std::size_t i{0}; i < slots_size; ++i) {
 			using entity_data_t = std::vector<packed_entity_data_t>;
 			entity_data_t &entity_data{packentity_params->entity_data[i]};
 
@@ -1485,7 +1486,7 @@ DETOUR_DECL_MEMBER2(CFrameSnapshotManager_GetPackedEntity, PackedEntity *, CFram
 
 	const packed_entity_data_t *packedData{nullptr};
 	const std::size_t slots_size{packentity_params->slots.size()};
-	for(int i{0}; i < slots_size; ++i) {
+	for(std::size_t i{0}; i < slots_size; ++i) {
 		if(packentity_params->slots[i] == slot) {
 			const std::vector<packed_entity_data_t> &entity_data{packentity_params->entity_data[i]};
 			for(const packed_entity_data_t &it : entity_data) {
@@ -1696,7 +1697,7 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 
 bool Sample::is_parallel_pack_allowed() const noexcept
 {
-	return !std::any_of(pack_ent_listeners.cbegin(), pack_ent_listeners.cend(), 
+	return !std::any_of(pack_ent_listeners.cbegin(), pack_ent_listeners.cend(),
 		[](const parallel_pack_listener *listener) noexcept -> bool {
 			return !listener->is_allowed();
 		}
@@ -1769,7 +1770,28 @@ static void game_frame(bool simulating) noexcept
 		return;
 	}
 
-	
+	// dumb nonsense so clients are fully aware that our hooked edicts are changing.
+	// this looks hacky, and it is, but there is not a better way i could find
+	// after tearing my hair out for 3 days of research
+	for (auto& hook : hooks)
+	{
+		int ref = hook.first; // hook.second.ref;
+		//for (auto& cb : hook.second.callbacks)
+		//{
+		//	cb.second.change_edict_state();
+		//}
+		CBaseEntity* pEntity = gamehelpers->ReferenceToEntity(ref);
+		if (!pEntity)
+		{
+			continue;
+		}
+		edict_t* edict = pEntity->GetNetworkable()->GetEdict();
+		if (!edict)
+		{
+			continue;
+		}
+		gamehelpers->SetEdictStateChanged(edict, 0);
+	}
 }
 
 DETOUR_DECL_MEMBER1(CGameServer_SendClientMessages, void, bool, bSendSnapshots)
