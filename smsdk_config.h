@@ -40,7 +40,7 @@
 /* Basic information exposed publicly */
 #define SMEXT_CONF_NAME			"proxysend"
 #define SMEXT_CONF_DESCRIPTION	"proxysend"
-#define SMEXT_CONF_VERSION		"0.1.0.7"
+#define SMEXT_CONF_VERSION		"0.1.0.8"
 #define SMEXT_CONF_AUTHOR		"Arthurdead"
 #define SMEXT_CONF_URL			""
 #define SMEXT_CONF_LOGTAG		"PROXYSEND"

@@ -653,6 +653,42 @@ private:
 	}
 };
 
+CBaseEntity *ReferenceToEntity(unsigned long ref)
+{
+	union {
+		cell_t sp_val;
+		unsigned long e_val;
+	} u;
+
+	u.e_val = ref;
+
+	return gamehelpers->ReferenceToEntity(u.sp_val);
+}
+
+unsigned long EntityToReference(CBaseEntity *ent)
+{
+	union {
+		cell_t sp_val;
+		unsigned long e_val;
+	} u;
+
+	u.sp_val = gamehelpers->EntityToReference(ent);
+
+	return u.e_val;
+}
+
+unsigned long IndexToReference(int objectID)
+{
+	union {
+		cell_t sp_val;
+		unsigned long e_val;
+	} u;
+
+	u.sp_val = gamehelpers->IndexToReference(objectID);
+
+	return u.e_val;
+}
+
 struct packed_entity_data_t final
 {
 	packed_entity_data_t(packed_entity_data_t &&other) noexcept
@@ -669,7 +705,7 @@ struct packed_entity_data_t final
 
 	char *packedData{nullptr};
 	bf_write *writeBuf{nullptr};
-	int ref{INVALID_EHANDLE_INDEX};
+	unsigned long ref{INVALID_EHANDLE_INDEX};
 
 	bool allocated() const noexcept
 	{ return (packedData && writeBuf); }
@@ -709,10 +745,10 @@ struct pack_entity_params_t final
 {
 	std::vector<std::vector<packed_entity_data_t>> entity_data{};
 	std::vector<int> slots{};
-	std::vector<int> entities{};
+	std::vector<unsigned long> entities{};
 	int snapshot_index{-1};
 
-	pack_entity_params_t(std::vector<int> &&slots_, std::vector<int> &&entities_, int snapshot_index_) noexcept
+	pack_entity_params_t(std::vector<int> &&slots_, std::vector<unsigned long> &&entities_, int snapshot_index_) noexcept
 		: slots{std::move(slots_)}, entities{std::move(entities_)}, snapshot_index{snapshot_index_}
 	{
 		entity_data.resize(slots.size());
@@ -807,8 +843,11 @@ struct opaque_ptr final
 	{ operator=(std::move(other)); }
 
 	template <typename T>
-	static void del_hlpr(void *ptr_) noexcept
+	static void del_hlpr_arr(void *ptr_) noexcept
 	{ delete[] static_cast<T *>(ptr_); }
+	template <typename T>
+	static void del_hlpr(void *ptr_) noexcept
+	{ delete static_cast<T *>(ptr_); }
 
 	opaque_ptr() = default;
 
@@ -817,8 +856,16 @@ struct opaque_ptr final
 		if(del_func && ptr) {
 			del_func(ptr);
 		}
-		ptr = static_cast<void *>(new T{std::forward<Args>(args)...});
-		del_func = del_hlpr<T>;
+		if(num > 1) {
+			ptr = static_cast<void *>(new T[num]);
+			for(size_t i = 0; i < num; ++i) {
+				new (&static_cast<T *>(ptr)[i]) T{std::forward<Args>(args)...};
+			}
+			del_func = del_hlpr_arr<T>;
+		} else {
+			ptr = static_cast<void *>(new T{std::forward<Args>(args)...});
+			del_func = del_hlpr<T>;
+		}
 	}
 
 	void clear() noexcept {
@@ -868,7 +915,7 @@ private:
 
 struct callback_t final : prop_reference_t
 {
-	callback_t(int ref_, SendProp *pProp, std::string &&name_, int element_, prop_types type_, std::size_t offset_) noexcept
+	callback_t(unsigned long ref_, SendProp *pProp, std::string &&name_, int element_, prop_types type_, std::size_t offset_) noexcept
 		: prop_reference_t{pProp, type_}, offset{offset_}, type{type_}, element{element_}, name{std::move(name_)}, prop{pProp}, ref{ref_}
 	{
 		if(type == prop_types::cstring || type == prop_types::tstring) {
@@ -908,10 +955,12 @@ struct callback_t final : prop_reference_t
 	void change_edict_state() noexcept
 	{
 		if(ref != INVALID_EHANDLE_INDEX) {
-			CBaseEntity *pEntity{gamehelpers->ReferenceToEntity(ref)};
-			edict_t *edict{pEntity->GetNetworkable()->GetEdict()};
-			if(edict) {
-				gamehelpers->SetEdictStateChanged(edict, offset);
+			CBaseEntity *pEntity{::ReferenceToEntity(ref)};
+			if(pEntity) {
+				edict_t *edict{pEntity->GetNetworkable()->GetEdict()};
+				if(edict) {
+					gamehelpers->SetEdictStateChanged(edict, offset);
+				}
 			}
 		}
 	}
@@ -1010,6 +1059,8 @@ struct callback_t final : prop_reference_t
 			pEntity = gamehelpers->ReferenceToEntity(sp_value);
 			if(pEntity) {
 				new_value = pEntity->GetRefEHandle();
+			} else {
+				new_value.Term();
 			}
 			return true;
 		}
@@ -1116,8 +1167,10 @@ struct callback_t final : prop_reference_t
 		fwd->PushCell(objectID);
 		fwd->PushStringEx((char *)name.c_str(), name.size()+1, SM_PARAM_STRING_COPY|SM_PARAM_STRING_UTF8, 0);
 		static char sp_value[4096];
-		strcpy(sp_value, reinterpret_cast<const char *>(old_pData));
-		fwd->PushStringEx(sp_value, sizeof(sp_value), SM_PARAM_STRING_UTF8|SM_PARAM_STRING_COPY, SM_PARAM_COPYBACK);
+		const char *str{reinterpret_cast<const char *>(old_pData)};
+		size_t len{strlen(str)};
+		strcpy(sp_value, str);
+		fwd->PushStringEx(sp_value, len, SM_PARAM_STRING_UTF8|SM_PARAM_STRING_COPY, SM_PARAM_COPYBACK);
 		fwd->PushCell(sizeof(sp_value));
 		fwd->PushCell(element);
 		fwd->PushCell(client);
@@ -1137,8 +1190,10 @@ struct callback_t final : prop_reference_t
 		fwd->PushCell(objectID);
 		fwd->PushStringEx((char *)name.c_str(), name.size()+1, SM_PARAM_STRING_COPY|SM_PARAM_STRING_UTF8, 0);
 		static char sp_value[4096];
-		strcpy(sp_value, STRING(*reinterpret_cast<const string_t *>(old_pData)));
-		fwd->PushStringEx(sp_value, sizeof(sp_value), SM_PARAM_STRING_UTF8|SM_PARAM_STRING_COPY, SM_PARAM_COPYBACK);
+		const char *str{STRING(*reinterpret_cast<const string_t *>(old_pData))};
+		size_t len{strlen(str)};
+		strcpy(sp_value, str);
+		fwd->PushStringEx(sp_value, len, SM_PARAM_STRING_UTF8|SM_PARAM_STRING_COPY, SM_PARAM_COPYBACK);
 		fwd->PushCell(sizeof(sp_value));
 		fwd->PushCell(element);
 		fwd->PushCell(client);
@@ -1237,7 +1292,7 @@ struct callback_t final : prop_reference_t
 	int element{0};
 	std::string name{};
 	SendProp *prop{nullptr};
-	int ref{INVALID_EHANDLE_INDEX};
+	unsigned long ref{INVALID_EHANDLE_INDEX};
 
 	struct per_client_func_t
 	{
@@ -1278,9 +1333,9 @@ using callbacks_t = std::unordered_map<const SendProp *, callback_t>;
 struct proxyhook_t final
 {
 	callbacks_t callbacks;
-	int ref{INVALID_EHANDLE_INDEX};
+	unsigned long ref{INVALID_EHANDLE_INDEX};
 
-	inline proxyhook_t(int ref_) noexcept
+	inline proxyhook_t(unsigned long ref_) noexcept
 		: ref{ref_}
 	{
 	}
@@ -1316,7 +1371,7 @@ private:
 	proxyhook_t() = delete;
 };
 
-using hooks_t = std::unordered_map<int, proxyhook_t>;
+using hooks_t = std::unordered_map<unsigned long, proxyhook_t>;
 static hooks_t hooks;
 
 DETOUR_DECL_STATIC6(SendTable_Encode, bool, const SendTable *, pTable, const void *, pStruct, bf_write *, pOut, int, objectID, CUtlMemory<CSendProxyRecipients> *, pRecipients, bool, bNonZeroOnly)
@@ -1335,9 +1390,9 @@ DETOUR_DECL_STATIC6(SendTable_Encode, bool, const SendTable *, pTable, const voi
 		}
 	}
 
-	int ref{gamehelpers->IndexToReference(objectID)};
+	unsigned long ref{::IndexToReference(objectID)};
 
-	const std::vector<int> &entities{packentity_params->entities};
+	const std::vector<unsigned long> &entities{packentity_params->entities};
 	if(std::find(entities.cbegin(), entities.cend(), ref) != entities.cend()) {
 		const std::size_t slots_size{packentity_params->slots.size()};
 		for(int i{0}; i < slots_size; ++i) {
@@ -1378,7 +1433,7 @@ DETOUR_DECL_STATIC8(SendTable_CalcDelta, int, const SendTable *, pTable, const v
 
 		int new_nChanges{total_nChanges};
 
-		int ref = gamehelpers->IndexToReference(objectID);
+		unsigned long ref = ::IndexToReference(objectID);
 
 		const std::size_t slots_size{packentity_params->slots.size()};
 		for(int i{0}; i < slots_size; ++i) {
@@ -1481,7 +1536,7 @@ DETOUR_DECL_MEMBER2(CFrameSnapshotManager_GetPackedEntity, PackedEntity *, CFram
 
 	const int slot{writedeltaentities_client};
 
-	int ref{gamehelpers->IndexToReference(entity)};
+	unsigned long ref{::IndexToReference(entity)};
 
 	const packed_entity_data_t *packedData{nullptr};
 	const std::size_t slots_size{packentity_params->slots.size()};
@@ -1515,10 +1570,13 @@ static ConVar *sv_stressbots{nullptr};
 
 static bool is_client_valid(CBaseClient *client) noexcept
 {
+	if(client->IsHLTV() ||
+		client->IsReplay()) {
+		return false;
+	}
+
 	if(!sv_stressbots->GetBool()) {
-		if(client->IsFakeClient() ||
-			client->IsHLTV() ||
-			client->IsReplay()) {
+		if(client->IsFakeClient()) {
 			return false;
 		}
 	}
@@ -1571,9 +1629,16 @@ void PostWriteDeltaEntities()
 
 DETOUR_DECL_MEMBER4(CBaseServer_WriteDeltaEntities, void, CBaseClient *, client, CClientFrame *, to, CClientFrame *, from, bf_write &, pBuf)
 {
-	PreWriteDeltaEntities(client);
-	DETOUR_MEMBER_CALL(CBaseServer_WriteDeltaEntities)(client, to, from, pBuf);
-	PostWriteDeltaEntities();
+	CBaseServer *pthis = (CBaseServer *)this;
+
+	if(pthis->IsHLTV() ||
+		pthis->IsReplay()) {
+		DETOUR_MEMBER_CALL(CBaseServer_WriteDeltaEntities)(client, to, from, pBuf);
+	} else {
+		PreWriteDeltaEntities(client);
+		DETOUR_MEMBER_CALL(CBaseServer_WriteDeltaEntities)(client, to, from, pBuf);
+		PostWriteDeltaEntities();
+	}
 }
 
 static CDetour *CBaseServer_WriteDeltaEntities_detour{nullptr};
@@ -1619,7 +1684,7 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 	}
 	const std::size_t slots_size{slots.size()};
 
-	std::vector<int> entities{};
+	std::vector<unsigned long> entities{};
 
 	bool any_hook{false};
 
@@ -1627,10 +1692,10 @@ DETOUR_DECL_STATIC3(SV_ComputeClientPacks, void, int, clientCount, CGameClient *
 
 	for(int i{0}; i < snapshot->m_nValidEntities; ++i) {
 		int idx{snapshot->m_pValidEntities[i]};
-		int ref{gamehelpers->IndexToReference(idx)};
+		unsigned long ref{::IndexToReference(idx)};
 
 		for(auto it : g_Sample.pack_ent_listeners) {
-			CBaseEntity *pEntity{gamehelpers->ReferenceToEntity(ref)};
+			CBaseEntity *pEntity{::ReferenceToEntity(ref)};
 			if(pEntity) {
 				it->pre_pack_entity(pEntity);
 			}
@@ -1730,7 +1795,7 @@ static void global_send_proxy(const SendProp *pProp, const void *pStructBase, co
 
 	if(objectID != -1) {
 		const hooks_t &chooks{hooks};
-		int ref{gamehelpers->IndexToReference(objectID)};
+		unsigned long ref{::IndexToReference(objectID)};
 		hooks_t::const_iterator it_hook{chooks.find(ref)};
 		if(it_hook != chooks.cend()) {
 			callbacks_t::const_iterator it_callback{it_hook->second.callbacks.find(pProp)};
@@ -1882,7 +1947,7 @@ static bool FindSendPropInfo(ServerClass *pClass, std::string &&name, sm_sendpro
 	return false;
 }
 
-static cell_t proxysend_handle_hook(IPluginContext *pContext, hooks_t::iterator it_hook, int idx, int offset, SendProp *pProp, std::string &&prop_name, int element, SendTable *pTable, IPluginFunction *callback, bool per_client)
+static cell_t proxysend_handle_hook(IPluginContext *pContext, hooks_t::iterator it_hook, unsigned long ref, int offset, SendProp *pProp, std::string &&prop_name, int element, SendTable *pTable, IPluginFunction *callback, bool per_client)
 {
 	prop_types type{prop_types::unknown};
 	restores_t::const_iterator it_restore{restores.find(pProp)};
@@ -1896,7 +1961,7 @@ static cell_t proxysend_handle_hook(IPluginContext *pContext, hooks_t::iterator 
 	}
 
 #ifdef _DEBUG
-	printf("added %s %p hook for %i\n", pProp->GetName(), pProp, idx);
+	printf("added %s %p hook for %i\n", pProp->GetName(), pProp, ref);
 #endif
 
 	it_hook->second.add_callback(pProp, std::move(prop_name), element, type, offset, callback, per_client);
@@ -1931,11 +1996,11 @@ static cell_t proxysend_hook(IPluginContext *pContext, const cell_t *params) noe
 	SendProp *pProp{info.prop};
 	std::string prop_name{pProp->GetName()};
 
-	int ref = gamehelpers->EntityToReference(pEntity);
+	unsigned long ref = ::EntityToReference(pEntity);
 
 	hooks_t::iterator it_hook{hooks.find(ref)};
 	if(it_hook == hooks.end()) {
-		it_hook = hooks.emplace(std::pair<int, proxyhook_t>{ref, proxyhook_t{ref}}).first;
+		it_hook = hooks.emplace(std::pair<unsigned long, proxyhook_t>{ref, proxyhook_t{ref}}).first;
 	}
 
 	edict_t *edict{pEntity->GetNetworkable()->GetEdict()};
@@ -1968,7 +2033,7 @@ static cell_t proxysend_hook(IPluginContext *pContext, const cell_t *params) noe
 	return ret;
 }
 
-static void proxysend_handle_unhook(hooks_t::iterator it_hook, int ref, const SendProp *pProp, const char *name, IPluginFunction *callback)
+static void proxysend_handle_unhook(hooks_t::iterator it_hook, unsigned long ref, const SendProp *pProp, const char *name, IPluginFunction *callback)
 {
 	callbacks_t::iterator it_callback{it_hook->second.callbacks.find(pProp)};
 	if(it_callback != it_hook->second.callbacks.end()) {
@@ -2007,7 +2072,7 @@ static cell_t proxysend_unhook(IPluginContext *pContext, const cell_t *params) n
 
 	IPluginFunction *callback{pContext->GetFunctionById(params[3])};
 
-	int ref = gamehelpers->EntityToReference(pEntity);
+	unsigned long ref = gamehelpers->EntityToReference(pEntity);
 
 	hooks_t::iterator it_hook{hooks.find(ref)};
 	if(it_hook != hooks.end()) {
@@ -2235,7 +2300,7 @@ void Sample::OnEntityDestroyed(CBaseEntity *pEntity) noexcept
 		return;
 	}
 
-	const int ref{gamehelpers->EntityToReference(pEntity)};
+	const unsigned long ref{::EntityToReference(pEntity)};
 
 	hooks_t::iterator it_hook{hooks.find(ref)};
 	if(it_hook != hooks.end()) {
