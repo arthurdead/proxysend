@@ -808,7 +808,8 @@ struct opaque_ptr final
 
 	template <typename T>
 	static void del_hlpr(void *ptr_) noexcept
-	{ delete static_cast<T *>(ptr_); }
+	// mismatched delete[]!
+	{ delete [] static_cast<T *>(ptr_); }
 
 	opaque_ptr() = default;
 
@@ -907,7 +908,7 @@ struct callback_t final : prop_reference_t
 
 	void change_edict_state() noexcept
 	{
-		if(ref != (int)INVALID_EHANDLE_INDEX) {
+		if(ref != INVALID_EHANDLE_INDEX) {
 			CBaseEntity *pEntity{gamehelpers->ReferenceToEntity(ref)};
 			edict_t *edict{pEntity->GetNetworkable()->GetEdict()};
 			if(edict) {
@@ -1127,7 +1128,7 @@ struct callback_t final : prop_reference_t
 			new_pData.emplace<char>(strlen(sp_value)+1);
 			char *new_value{new_pData.get<char>()};
 			// ????????
-			// strcpy(new_value, new_value);
+			strcpy(new_value, new_value);
 			return true;
 		}
 		return false;
