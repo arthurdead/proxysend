@@ -733,6 +733,7 @@ struct packed_entity_data_t final
 		reset();
 
 		packedData = static_cast<char *>(aligned_alloc(4, MAX_PACKEDENTITY_DATA));
+		memset(packedData, 0x0, MAX_PACKEDENTITY_DATA);
 		writeBuf = new bf_write{"SV_PackEntity->writeBuf", packedData, MAX_PACKEDENTITY_DATA};
 	}
 
