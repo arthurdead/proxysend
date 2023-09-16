@@ -2208,7 +2208,7 @@ bool Sample::SDK_OnLoad(char *error, size_t maxlen, bool late) noexcept
 		return false;
 	}
 
-#if SOURCE_ENGINE == SE_TF2
+#if SOURCE_ENGINE == SE_TF2 || SOURCE_ENGINE == SE_CSS
 	{
 		void **vtable = *(void ***)server;
 		int index = vfunc_index(&CBaseServer::WriteDeltaEntities);
@@ -2273,7 +2273,7 @@ bool Sample::SDK_OnMetamodLoad(ISmmAPI *ismm, char *error, size_t maxlen, bool l
 	GET_V_IFACE_ANY(GetEngineFactory, g_pCVar, ICvar, CVAR_INTERFACE_VERSION);
 	ConVar_Register(0, this);
 
-#if SOURCE_ENGINE == SE_TF2
+#if SOURCE_ENGINE == SE_TF2 || SOURCE_ENGINE == SE_CSS
 	server = engine->GetIServer();
 #endif
 

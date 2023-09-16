@@ -30,7 +30,7 @@ def CopyFiles(src, dest, files):
 
 # Include files 
 CopyFiles('sourcemod/scripting/include', 'addons/sourcemod/scripting/include',
-  [ 'proxysend.inc', ]
+  [ 'proxysend.inc', 'proxysend_tf2.inc' ]
 )
 
 # GameData files

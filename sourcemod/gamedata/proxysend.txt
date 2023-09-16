@@ -1,6 +1,6 @@
 "Games"
 {
-	"tf"
+	"#default"
 	{
 		"Offsets"
 		{
